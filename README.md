@@ -3,7 +3,15 @@
 A [Fabric](https://fabricmc.net/) client mod that filters matching chat into extra HUD panes you can move and resize.
 Patterns use plain text by default; prefix with `regex:` when you want a full Java regular expression.
 
-![Demo: moving and resizing chat windows](https://cdn.rainnny.club/eg5cCr6O.gif)
+![Demo: moving and resizing chat windows](https://github.com/Rainnny7/chat-windows/tree/master/.github/media/creation.mp4)
+
+## Background
+
+I wanted something like [LabyMod](https://www.labymod.net/)’s chat filtering—separate panes for matched messages—but as
+its **own Fabric mod**, not tied to a big client stack. I couldn’t find an existing mod that did that the way I wanted,
+so this project exists to fill that gap.
+
+The codebase is **fully vibe coded**—built iteratively with AI help—with the goal of a small mod I can actually use.
 
 ## Requirements
 
@@ -54,14 +62,6 @@ is stored with a `regex:` prefix when you save).
 
 Settings are saved under `.minecraft/config/chat-windows.json` (via [Fabric Loader](https://fabricmc.net/)’s config
 directory).
-
-## Background
-
-I wanted something like [LabyMod](https://www.labymod.net/)’s chat filtering—separate panes for matched messages—but as
-its **own Fabric mod**, not tied to a big client stack. I couldn’t find an existing mod that did that the way I wanted,
-so this project exists to fill that gap.
-
-The codebase is **fully vibe coded**—built iteratively with AI help—with the goal of a small mod I can actually use.
 
 ## Links
 

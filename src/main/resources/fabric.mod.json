@@ -23,6 +23,10 @@
 		{
 			"config": "chat-utilities.client.mixins.json",
 			"environment": "client"
+		},
+		{
+			"config": "chat-utilities.client.optional-mixins.json",
+			"environment": "client"
 		}
 	],
 	"depends": {

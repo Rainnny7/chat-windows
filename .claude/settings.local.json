@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./gradlew compileJava)",
+      "Bash(./gradlew compileClientJava)",
+      "mcp__ide__getDiagnostics",
+      "Bash(jar tf:*)",
+      "Bash('/c/Program Files/Java/jdk-25.0.2/bin/jar' tf ./.gradle/loom-cache/minecraftMaven/net/minecraft/minecraft-clientOnly-6dd721cd7d/1.21.11-loom.mappings.1_21_11.layered+hash.2198-v2/minecraft-clientOnly-6dd721cd7d-1.21.11-loom.mappings.1_21_11.layered+hash.2198-v2-sources.jar)"
+    ]
+  }
+}

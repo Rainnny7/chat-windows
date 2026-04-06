@@ -307,6 +307,21 @@ public final class ChatUtilitiesManager {
         return true;
     }
 
+    /**
+     * Puts every visible window in the given profile into positioning mode simultaneously,
+     * so all windows can be dragged at once from the Chat Windows panel.
+     */
+    public void enableAllWindowsPositioning(String profileId) {
+        ServerProfile profile = profilesById.get(profileId);
+        if (profile == null) {
+            return;
+        }
+        for (ChatWindow w : profile.getWindows().values()) {
+            w.setPositioningMode(w.isVisible());
+        }
+        save();
+    }
+
     public void togglePosition(String profileId, String windowId) {
         ServerProfile profile = profilesById.get(profileId);
         if (profile == null) {

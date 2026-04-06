@@ -54,23 +54,7 @@ public class WindowManageScreen extends Screen {
                             mgr.toggleVisibility(p, windowId);
                             init();
                         })
-                        .bounds(cx - 100, y, 95, 20)
-                        .build());
-        addRenderableWidget(
-                Button.builder(Component.literal("Position"), b -> {
-                            if (!(parent instanceof ProfileWorkflowScreen wf)) {
-                                return;
-                            }
-                            mgr.setRestoreScreenAfterPosition(
-                                    () ->
-                                            new WindowManageScreen(
-                                                    profileId,
-                                                    windowId,
-                                                    wf.recreateForProfile()));
-                            mgr.togglePosition(profileId, windowId);
-                            Minecraft.getInstance().setScreen(null);
-                        })
-                        .bounds(cx + 5, y, 95, 20)
+                        .bounds(cx - 100, y, 200, 20)
                         .build());
         y += 26;
 

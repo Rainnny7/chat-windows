@@ -1,9 +1,9 @@
 package me.braydon.chatutilities.mixin.client;
 
 import me.braydon.chatutilities.chat.ChatClickCopyHandler;
+import me.braydon.chatutilities.chat.ChatSymbolPalette;
 import me.braydon.chatutilities.chat.ChatUtilitiesManager;
 import me.braydon.chatutilities.chat.ChatWindowClickHandler;
-import me.braydon.chatutilities.chat.ChatSymbolPalette;
 import me.braydon.chatutilities.client.ChatUtilitiesClientOptions;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;

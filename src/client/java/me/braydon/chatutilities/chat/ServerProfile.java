@@ -1,6 +1,9 @@
 package me.braydon.chatutilities.chat;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Objects;
 
 /** One server profile: host rules, ignore patterns, and chat windows. */
 public final class ServerProfile {

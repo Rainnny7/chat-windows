@@ -1,10 +1,8 @@
 package me.braydon.chatutilities.gui;
 
 import com.mojang.blaze3d.platform.InputConstants;
-
 import me.braydon.chatutilities.chat.ChatUtilitiesManager;
 import me.braydon.chatutilities.chat.ServerProfile;
-import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.Button;
 import net.minecraft.client.gui.components.EditBox;

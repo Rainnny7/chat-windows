@@ -1,29 +1,25 @@
 package me.braydon.chatutilities.gui;
 
+import com.google.gson.JsonParseException;
 import com.mojang.blaze3d.platform.InputConstants;
-
 import me.braydon.chatutilities.ChatUtilitiesModClient;
+import me.braydon.chatutilities.chat.*;
 import me.braydon.chatutilities.client.ChatUtilitiesClientOptions;
-import me.braydon.chatutilities.chat.ChatUtilitiesManager;
-import me.braydon.chatutilities.chat.ChatWindow;
-import me.braydon.chatutilities.chat.MessageSoundRule;
-import me.braydon.chatutilities.chat.ProfileFaviconCache;
-import me.braydon.chatutilities.chat.ServerProfile;
 import net.fabricmc.loader.api.FabricLoader;
+import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.AbstractWidget;
 import net.minecraft.client.gui.components.EditBox;
-import net.minecraft.client.gui.components.toasts.SystemToast;
 import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.components.events.GuiEventListener;
+import net.minecraft.client.gui.components.toasts.SystemToast;
 import net.minecraft.client.gui.narration.NarrationElementOutput;
-import net.minecraft.client.KeyMapping;
 import net.minecraft.client.gui.screens.ChatScreen;
 import net.minecraft.client.gui.screens.Screen;
 import net.minecraft.client.input.KeyEvent;
-import net.minecraft.client.input.MouseButtonInfo;
 import net.minecraft.client.input.MouseButtonEvent;
+import net.minecraft.client.input.MouseButtonInfo;
 import net.minecraft.client.renderer.RenderPipelines;
 import net.minecraft.client.resources.sounds.SimpleSoundInstance;
 import net.minecraft.network.chat.Component;
@@ -32,29 +28,17 @@ import net.minecraft.sounds.SoundEvents;
 import net.minecraft.util.Mth;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import org.lwjgl.glfw.GLFW;
 
-import com.google.gson.JsonParseException;
-
-import java.awt.Color;
-import java.awt.Desktop;
-import java.awt.FileDialog;
-import java.awt.GraphicsEnvironment;
+import java.awt.*;
 import java.io.IOException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.LinkedHashSet;
+import java.util.*;
 import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Set;
 import java.util.regex.PatternSyntaxException;
-
-import org.lwjgl.glfw.GLFW;
 
 /**
  * Main UI screen. Sodium-style: a centered floating panel with a left sidebar (profiles + sections)

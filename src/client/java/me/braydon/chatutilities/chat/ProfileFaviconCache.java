@@ -8,7 +8,8 @@ import net.minecraft.client.multiplayer.ServerStatusPinger;
 import net.minecraft.client.renderer.texture.DynamicTexture;
 import net.minecraft.resources.Identifier;
 import net.minecraft.server.network.EventLoopGroupHolder;
-import java.awt.Color;
+
+import java.awt.*;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.net.UnknownHostException;

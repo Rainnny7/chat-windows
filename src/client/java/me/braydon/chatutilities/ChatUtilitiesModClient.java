@@ -1,6 +1,9 @@
 package me.braydon.chatutilities;
 
-import me.braydon.chatutilities.chat.*;
+import me.braydon.chatutilities.chat.ChatUtilitiesHud;
+import me.braydon.chatutilities.chat.ChatUtilitiesManager;
+import me.braydon.chatutilities.chat.ChatUtilitiesScreenHooks;
+import me.braydon.chatutilities.chat.ChatUtilitiesTick;
 import me.braydon.chatutilities.client.ChatUtilitiesClientOptions;
 import me.braydon.chatutilities.command.ChatUtilitiesCommands;
 import net.fabricmc.api.ClientModInitializer;

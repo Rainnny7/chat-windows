@@ -8,7 +8,7 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.Style;
 import net.minecraft.util.FormattedCharSequence;
 
-import java.awt.Desktop;
+import java.awt.*;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;

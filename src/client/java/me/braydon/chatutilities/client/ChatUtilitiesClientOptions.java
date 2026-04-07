@@ -3,6 +3,7 @@ package me.braydon.chatutilities.client;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import net.fabricmc.loader.api.FabricLoader;
+import net.minecraft.util.Mth;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -24,21 +25,60 @@ public final class ChatUtilitiesClientOptions {
 
     private static boolean clickToCopyEnabled = true;
 
-    private static CopyFormattedStyle copyFormattedStyle = CopyFormattedStyle.SECTION_SYMBOL;
+    private static CopyFormattedStyle copyFormattedStyle = CopyFormattedStyle.VANILLA;
 
     private static ClickMouseBinding copyPlainBinding = ClickMouseBinding.defaultPlain();
 
     private static ClickMouseBinding copyFormattedBinding = ClickMouseBinding.defaultFormatted();
 
-    /** Last expanded profile id in the Chat Utilities menu; restored when reopening. */
+    /**
+     * Session-only: last Chat Utilities sidebar profile + panel. Survives closing/reopening the GUI in this JVM run;
+     * not written to {@link #FILE_NAME} (does not survive game restart).
+     */
     private static String lastMenuProfileId;
 
     /** {@link me.braydon.chatutilities.gui.ChatUtilitiesRootScreen.Panel#name()} */
     private static String lastMenuPanel;
 
+    private static boolean smoothChat;
+
+    /** Fade-in duration for smooth chat (milliseconds), clamped {@link #SMOOTH_CHAT_FADE_MS_MIN}–{@link #SMOOTH_CHAT_FADE_MS_MAX}. */
+    private static int smoothChatFadeMs = 200;
+
+    /** Duration of the chat input bar slide-in when opening chat (milliseconds). */
+    private static int smoothChatBarOpenMs = 200;
+
+    public static final int SMOOTH_CHAT_FADE_MS_MIN = 50;
+
+    public static final int SMOOTH_CHAT_FADE_MS_MAX = 2000;
+
+    /** Millisecond steps for smooth-chat sliders (fade + chat bar open). */
+    public static final int SMOOTH_CHAT_SLIDER_STEP_MS = 50;
+
+    /** Vanilla client keeps this many recent chat messages; used when longer history is off. */
+    public static final int VANILLA_CHAT_HISTORY_LINES = 100;
+
+    public static final int CHAT_HISTORY_LIMIT_MIN = 100;
+
+    public static final int CHAT_HISTORY_LIMIT_MAX = 5000;
+
+    public static final int CHAT_HISTORY_LIMIT_STEP = 50;
+
+    public static final int CHAT_HISTORY_LIMIT_DEFAULT = 500;
+
+    private static boolean longerChatHistory;
+
+    /** Stored limit when {@link #longerChatHistory} is on; clamped when read or written. */
+    private static int chatHistoryLimitLines = CHAT_HISTORY_LIMIT_DEFAULT;
+
+    private static boolean stackRepeatedMessages;
+
     private ChatUtilitiesClientOptions() {}
 
     public enum CopyFormattedStyle {
+        /** {@code &} legacy codes (server.properties / common plugin style). */
+        VANILLA,
+        /** {@code §} legacy codes (Java Edition section sign). */
         SECTION_SYMBOL,
         MINIMESSAGE
     }
@@ -92,15 +132,17 @@ public final class ChatUtilitiesClientOptions {
     }
 
     public static void setCopyFormattedStyle(CopyFormattedStyle value) {
-        copyFormattedStyle = value != null ? value : CopyFormattedStyle.SECTION_SYMBOL;
+        copyFormattedStyle = value != null ? value : CopyFormattedStyle.VANILLA;
         save();
     }
 
     public static void cycleCopyFormattedStyle() {
         setCopyFormattedStyle(
-                copyFormattedStyle == CopyFormattedStyle.SECTION_SYMBOL
-                        ? CopyFormattedStyle.MINIMESSAGE
-                        : CopyFormattedStyle.SECTION_SYMBOL);
+                switch (copyFormattedStyle) {
+                    case VANILLA -> CopyFormattedStyle.SECTION_SYMBOL;
+                    case SECTION_SYMBOL -> CopyFormattedStyle.MINIMESSAGE;
+                    case MINIMESSAGE -> CopyFormattedStyle.VANILLA;
+                });
     }
 
     public static ClickMouseBinding getCopyPlainBinding() {
@@ -132,6 +174,104 @@ public final class ChatUtilitiesClientOptions {
     public static void setLastMenuState(String profileId, String panelName) {
         lastMenuProfileId = profileId;
         lastMenuPanel = panelName;
+    }
+
+    public static boolean isSmoothChat() {
+        return smoothChat;
+    }
+
+    public static void setSmoothChat(boolean value) {
+        smoothChat = value;
+        save();
+    }
+
+    public static void toggleSmoothChat() {
+        setSmoothChat(!smoothChat);
+    }
+
+    public static int getSmoothChatFadeMs() {
+        return smoothChatFadeMs;
+    }
+
+    public static void setSmoothChatFadeMs(int ms) {
+        smoothChatFadeMs = Mth.clamp(ms, SMOOTH_CHAT_FADE_MS_MIN, SMOOTH_CHAT_FADE_MS_MAX);
+        save();
+    }
+
+    public static int getSmoothChatBarOpenMs() {
+        return smoothChatBarOpenMs;
+    }
+
+    public static void setSmoothChatBarOpenMs(int ms) {
+        smoothChatBarOpenMs = Mth.clamp(ms, SMOOTH_CHAT_FADE_MS_MIN, SMOOTH_CHAT_FADE_MS_MAX);
+        save();
+    }
+
+    public static boolean isLongerChatHistory() {
+        return longerChatHistory;
+    }
+
+    public static void setLongerChatHistory(boolean value) {
+        longerChatHistory = value;
+        save();
+    }
+
+    public static void toggleLongerChatHistory() {
+        setLongerChatHistory(!longerChatHistory);
+    }
+
+    /**
+     * Max stored lines for vanilla HUD chat and per-window HUD history. When longer history is disabled, matches
+     * {@link #VANILLA_CHAT_HISTORY_LINES}.
+     */
+    public static int getEffectiveChatHistoryLimit() {
+        if (!longerChatHistory) {
+            return VANILLA_CHAT_HISTORY_LINES;
+        }
+        return Mth.clamp(chatHistoryLimitLines, CHAT_HISTORY_LIMIT_MIN, CHAT_HISTORY_LIMIT_MAX);
+    }
+
+    public static int getChatHistoryLimitLines() {
+        return Mth.clamp(chatHistoryLimitLines, CHAT_HISTORY_LIMIT_MIN, CHAT_HISTORY_LIMIT_MAX);
+    }
+
+    public static void setChatHistoryLimitLines(int lines) {
+        chatHistoryLimitLines = Mth.clamp(lines, CHAT_HISTORY_LIMIT_MIN, CHAT_HISTORY_LIMIT_MAX);
+        save();
+    }
+
+    public static boolean isStackRepeatedMessages() {
+        return stackRepeatedMessages;
+    }
+
+    public static void setStackRepeatedMessages(boolean value) {
+        stackRepeatedMessages = value;
+        save();
+    }
+
+    public static void toggleStackRepeatedMessages() {
+        setStackRepeatedMessages(!stackRepeatedMessages);
+    }
+
+    /**
+     * Restores all client preferences to built-in defaults (symbol selector, shadow, copy, smooth chat, etc.),
+     * clears session-only menu memory, and writes {@link #FILE_NAME} once.
+     */
+    public static void resetAllToDefaults() {
+        showChatSymbolSelector = true;
+        chatTextShadow = true;
+        clickToCopyEnabled = true;
+        copyFormattedStyle = CopyFormattedStyle.VANILLA;
+        copyPlainBinding = ClickMouseBinding.defaultPlain();
+        copyFormattedBinding = ClickMouseBinding.defaultFormatted();
+        lastMenuProfileId = null;
+        lastMenuPanel = null;
+        smoothChat = false;
+        smoothChatFadeMs = 200;
+        smoothChatBarOpenMs = 200;
+        longerChatHistory = false;
+        chatHistoryLimitLines = CHAT_HISTORY_LIMIT_DEFAULT;
+        stackRepeatedMessages = false;
         save();
     }
 
@@ -155,8 +295,21 @@ public final class ChatUtilitiesClientOptions {
                 if (d.copyFormattedBinding != null) {
                     copyFormattedBinding = d.copyFormattedBinding.normalized();
                 }
-                lastMenuProfileId = d.lastMenuProfileId;
-                lastMenuPanel = d.lastMenuPanel;
+                smoothChat = d.smoothChat;
+                if (d.smoothChatFadeMs > 0) {
+                    smoothChatFadeMs = Mth.clamp(
+                            d.smoothChatFadeMs, SMOOTH_CHAT_FADE_MS_MIN, SMOOTH_CHAT_FADE_MS_MAX);
+                }
+                if (d.smoothChatBarOpenMs > 0) {
+                    smoothChatBarOpenMs = Mth.clamp(
+                            d.smoothChatBarOpenMs, SMOOTH_CHAT_FADE_MS_MIN, SMOOTH_CHAT_FADE_MS_MAX);
+                }
+                longerChatHistory = d.longerChatHistory;
+                if (d.chatHistoryLimitLines > 0) {
+                    chatHistoryLimitLines =
+                            Mth.clamp(d.chatHistoryLimitLines, CHAT_HISTORY_LIMIT_MIN, CHAT_HISTORY_LIMIT_MAX);
+                }
+                stackRepeatedMessages = d.stackRepeatedMessages;
             }
         } catch (IOException ignored) {
         }
@@ -175,8 +328,12 @@ public final class ChatUtilitiesClientOptions {
             d.copyFormattedStyle = copyFormattedStyle.name();
             d.copyPlainBinding = copyPlainBinding;
             d.copyFormattedBinding = copyFormattedBinding;
-            d.lastMenuProfileId = lastMenuProfileId;
-            d.lastMenuPanel = lastMenuPanel;
+            d.smoothChat = smoothChat;
+            d.smoothChatFadeMs = smoothChatFadeMs;
+            d.smoothChatBarOpenMs = smoothChatBarOpenMs;
+            d.longerChatHistory = longerChatHistory;
+            d.chatHistoryLimitLines = getChatHistoryLimitLines();
+            d.stackRepeatedMessages = stackRepeatedMessages;
             Files.writeString(path, GSON.toJson(d), StandardCharsets.UTF_8);
         } catch (IOException ignored) {
         }
@@ -226,17 +383,18 @@ public final class ChatUtilitiesClientOptions {
 
     private static CopyFormattedStyle parseCopyFormattedStyle(String raw) {
         if (raw == null || raw.isEmpty()) {
-            return CopyFormattedStyle.SECTION_SYMBOL;
+            return CopyFormattedStyle.VANILLA;
         }
         String s = raw.trim();
         return switch (s) {
             case "MINIMESSAGE" -> CopyFormattedStyle.MINIMESSAGE;
             case "SECTION_SYMBOL", "COMPONENT" -> CopyFormattedStyle.SECTION_SYMBOL;
+            case "VANILLA" -> CopyFormattedStyle.VANILLA;
             default -> {
                 try {
                     yield CopyFormattedStyle.valueOf(s);
                 } catch (IllegalArgumentException e) {
-                    yield CopyFormattedStyle.SECTION_SYMBOL;
+                    yield CopyFormattedStyle.VANILLA;
                 }
             }
         };
@@ -246,10 +404,14 @@ public final class ChatUtilitiesClientOptions {
         boolean showChatSymbolSelector = true;
         boolean chatTextShadow = true;
         boolean clickToCopyEnabled = true;
-        String copyFormattedStyle = CopyFormattedStyle.SECTION_SYMBOL.name();
+        String copyFormattedStyle = CopyFormattedStyle.VANILLA.name();
         ClickMouseBinding copyPlainBinding;
         ClickMouseBinding copyFormattedBinding;
-        String lastMenuProfileId;
-        String lastMenuPanel;
+        boolean smoothChat;
+        int smoothChatFadeMs = 200;
+        int smoothChatBarOpenMs = 200;
+        boolean longerChatHistory;
+        int chatHistoryLimitLines = CHAT_HISTORY_LIMIT_DEFAULT;
+        boolean stackRepeatedMessages;
     }
 }

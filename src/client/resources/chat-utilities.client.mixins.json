@@ -4,6 +4,9 @@
 	"compatibilityLevel": "JAVA_21",
 	"refmap": "chat-utilities.client.refmap.json",
 	"client": [
+		"ChatComponentAccess",
+		"ChatComponentClickableTextSlideMixin",
+		"ChatComponentDrawingFocusedSlideMixin",
 		"ChatComponentMixin",
 		"ChatScreenMixin",
 		"GuiGraphicsMixin",

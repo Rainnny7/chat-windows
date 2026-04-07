@@ -12,6 +12,7 @@ public final class ChatWindowFade {
         ChatComponent.AlphaCalculator opacity = ChatComponent.AlphaCalculator.timeBased(currentGuiTick);
         GuiMessage.Line line =
                 new GuiMessage.Line(addedGuiTick, FormattedCharSequence.EMPTY, null, true);
-        return Mth.clamp(opacity.calculate(line), 0f, 1f);
+        float base = Mth.clamp(opacity.calculate(line), 0f, 1f);
+        return base * ChatSmoothAppearance.fadeInMultiplier(addedGuiTick);
     }
 }

@@ -3,8 +3,9 @@ package me.braydon.chatutilities.chat;
 import java.util.*;
 import java.util.regex.Pattern;
 
+import me.braydon.chatutilities.client.ChatUtilitiesClientOptions;
+
 public final class ChatWindow {
-    private static final int MAX_STORED_LINES = 100;
     public static final float DEFAULT_WIDTH_FRAC = 0.32f;
     public static final int DEFAULT_MAX_VISIBLE_LINES = 12;
     public static final float MIN_WIDTH_FRAC = 0.12f;
@@ -134,10 +135,19 @@ public final class ChatWindow {
     }
 
     public void addLine(ChatWindowLine line) {
-        while (lines.size() >= MAX_STORED_LINES) {
+        ChatWindowLine toAdd = line;
+        if (ChatUtilitiesClientOptions.isStackRepeatedMessages()) {
+            ChatWindowLine last = lines.peekLast();
+            if (last != null && last.sameStackAs(line)) {
+                lines.removeLast();
+                toAdd = last.mergedWithRepeat();
+            }
+        }
+        int cap = ChatUtilitiesClientOptions.getEffectiveChatHistoryLimit();
+        while (lines.size() >= cap) {
             lines.removeFirst();
         }
-        lines.addLast(line);
+        lines.addLast(toAdd);
     }
 
     /** Clears HUD history for this window (e.g. when vanilla chat is cleared with F3+D). */

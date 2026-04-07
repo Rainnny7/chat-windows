@@ -72,6 +72,7 @@ public final class ChatClickCopyHandler {
         if (wantFormatted) {
             clip =
                     switch (ChatUtilitiesClientOptions.getCopyFormattedStyle()) {
+                        case VANILLA -> ChatCopyTextHelper.toLegacyAmpersandString(comp);
                         case SECTION_SYMBOL -> ChatCopyTextHelper.toLegacySectionString(comp);
                         case MINIMESSAGE -> ChatCopyTextHelper.toMiniMessageString(comp);
                     };
@@ -103,23 +104,22 @@ public final class ChatClickCopyHandler {
                             false,
                             true,
                             mx,
-                            my);
+                            my,
+                            false,
+                            false);
             if (geo.rows.isEmpty()) {
                 continue;
             }
             int tx = geo.x + ChatWindowGeometry.padding();
-            int ty = geo.y + ChatWindowGeometry.padding() + geo.contentStartYOffset;
+            int ty = geo.y + ChatWindowGeometry.padding() + ChatWindowGeometry.CONTENT_TOP_INSET + geo.contentStartYOffset;
             int textRight = geo.x + geo.boxW - ChatWindowGeometry.padding();
             int textBottom = geo.y + geo.boxH - ChatWindowGeometry.padding();
             if (mx < tx || mx >= textRight || my < ty || my >= textBottom) {
                 continue;
             }
             int relY = my - ty;
-            if (relY < 0) {
-                continue;
-            }
-            int rowIndex = relY / ChatWindowGeometry.lineHeight();
-            if (rowIndex < 0 || rowIndex >= geo.rows.size()) {
+            int rowIndex = ChatWindowGeometry.rowIndexForContentRelY(geo, relY);
+            if (rowIndex < 0) {
                 continue;
             }
             Optional<ChatWindowLine> src =

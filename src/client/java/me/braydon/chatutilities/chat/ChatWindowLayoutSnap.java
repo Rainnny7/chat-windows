@@ -52,7 +52,7 @@ public final class ChatWindowLayoutSnap {
             List<ChatWindow> positioned,
             String excludeId) {
         Component ph = w.getLines().isEmpty() ? Component.literal("[empty]") : null;
-        ChatWindowGeometry geo = ChatWindowGeometry.compute(w, mc, gw, gh, ph);
+        ChatWindowGeometry geo = ChatWindowGeometry.compute(w, mc, gw, gh, ph, true);
         int left = Math.round(raw * gw);
         int boxW = geo.boxW;
         return pickClosestLeft(left, boxW, gw, gh, positioned, excludeId, mc) / (float) gw;
@@ -67,7 +67,7 @@ public final class ChatWindowLayoutSnap {
             List<ChatWindow> positioned,
             String excludeId) {
         Component ph = w.getLines().isEmpty() ? Component.literal("[empty]") : null;
-        ChatWindowGeometry geo = ChatWindowGeometry.compute(w, mc, gw, gh, ph);
+        ChatWindowGeometry geo = ChatWindowGeometry.compute(w, mc, gw, gh, ph, true);
         int bottom = Math.round(raw * gh);
         int boxH = geo.boxH;
         return pickClosestBottom(bottom, boxH, gw, gh, positioned, excludeId, mc) / (float) gh;
@@ -89,7 +89,7 @@ public final class ChatWindowLayoutSnap {
                 continue;
             }
             Component ph = o.getLines().isEmpty() ? Component.literal("[empty]") : null;
-            ChatWindowGeometry g = ChatWindowGeometry.compute(o, mc, gw, gh, ph);
+            ChatWindowGeometry g = ChatWindowGeometry.compute(o, mc, gw, gh, ph, true);
             cands.add(g.x);
             cands.add(g.x + g.boxW);
         }
@@ -113,7 +113,7 @@ public final class ChatWindowLayoutSnap {
                 continue;
             }
             Component ph = o.getLines().isEmpty() ? Component.literal("[empty]") : null;
-            ChatWindowGeometry g = ChatWindowGeometry.compute(o, mc, gw, gh, ph);
+            ChatWindowGeometry g = ChatWindowGeometry.compute(o, mc, gw, gh, ph, true);
             cands.add(g.y + g.boxH);
             cands.add(g.y);
         }

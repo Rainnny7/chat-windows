@@ -24,9 +24,10 @@ public final class ChatWindowScrollbar {
         int boxW = geo.boxW;
         int boxH = geo.boxH;
         int pad = ChatWindowGeometry.padding();
+        int topInset = ChatWindowGeometry.CONTENT_TOP_INSET;
         int barX = x + boxW - pad - BAR_W;
-        int trackY = y + pad;
-        int trackH = boxH - 2 * pad;
+        int trackY = y + pad + topInset;
+        int trackH = boxH - 2 * pad - topInset;
         if (trackH < 4 || barX < x + pad) {
             return;
         }

@@ -2,6 +2,7 @@ package me.braydon.chatutilities.chat;
 
 import com.mojang.blaze3d.platform.cursor.CursorType;
 import com.mojang.blaze3d.platform.cursor.CursorTypes;
+import com.mojang.blaze3d.platform.Window;
 import me.braydon.chatutilities.ChatUtilitiesModClient;
 import me.braydon.chatutilities.gui.ChatUtilitiesRootScreen;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
@@ -10,9 +11,6 @@ import net.minecraft.client.gui.screens.ChatScreen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.util.Mth;
 import org.lwjgl.glfw.GLFW;
-import org.lwjgl.system.MemoryStack;
-
-import java.nio.DoubleBuffer;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -103,11 +101,7 @@ public final class ChatUtilitiesTick {
 
         // Collect all windows currently in positioning mode
         List<ChatWindow> positionedWindows = new ArrayList<>();
-        for (ChatWindow w : mgr.getActiveProfileWindows()) {
-            if (w.isPositioningMode()) {
-                positionedWindows.add(w);
-            }
-        }
+        positionedWindows.addAll(mgr.getPositioningLayoutWindows());
         if (positionedWindows.isEmpty()) {
             resetGuiCursor(mc);
             wasMouseDown = false;
@@ -116,22 +110,12 @@ public final class ChatUtilitiesTick {
             return;
         }
 
-        int gw = mc.getWindow().getGuiScaledWidth();
-        int gh = mc.getWindow().getGuiScaledHeight();
-        int sw = mc.getWindow().getScreenWidth();
-        int sh = mc.getWindow().getScreenHeight();
-
-        double mxFb, myFb;
-        try (MemoryStack stack = MemoryStack.stackPush()) {
-            DoubleBuffer xb = stack.mallocDouble(1);
-            DoubleBuffer yb = stack.mallocDouble(1);
-            GLFW.glfwGetCursorPos(handle, xb, yb);
-            mxFb = xb.get(0);
-            myFb = yb.get(0);
-        }
-
-        int mxGui = sw > 0 ? (int) Math.round(mxFb * gw / (double) sw) : 0;
-        int myGui = sh > 0 ? (int) Math.round(myFb * gh / (double) sh) : 0;
+        Window win = mc.getWindow();
+        int gw = win.getGuiScaledWidth();
+        int gh = win.getGuiScaledHeight();
+        // Match {@link ChatUtilitiesHud}: scaled GUI coordinates (differs from raw GLFW × scale on some setups).
+        int mxGui = (int) mc.mouseHandler.getScaledXPos(win);
+        int myGui = (int) mc.mouseHandler.getScaledYPos(win);
 
         boolean down = GLFW.glfwGetMouseButton(handle, GLFW.GLFW_MOUSE_BUTTON_LEFT) == GLFW.GLFW_PRESS;
 
@@ -143,7 +127,7 @@ public final class ChatUtilitiesTick {
                 for (int wi = positionedWindows.size() - 1; wi >= 0; wi--) {
                     ChatWindow w = positionedWindows.get(wi);
                     Component ph = w.getLines().isEmpty() ? Component.literal("[empty]") : null;
-                    ChatWindowGeometry geo = ChatWindowGeometry.compute(w, mc, gw, gh, ph);
+                    ChatWindowGeometry geo = ChatWindowGeometry.compute(w, mc, gw, gh, ph, true);
                     DragKind kind = pointerToDrag(ChatWindowGeometry.positioningPointerAt(mxGui, myGui, geo));
                     if (kind != DragKind.NONE) {
                         dragTargetId = w.getId();
@@ -196,7 +180,7 @@ public final class ChatUtilitiesTick {
             for (int wi = positionedWindows.size() - 1; wi >= 0; wi--) {
                 ChatWindow w = positionedWindows.get(wi);
                 Component ph = w.getLines().isEmpty() ? Component.literal("[empty]") : null;
-                ChatWindowGeometry geo = ChatWindowGeometry.compute(w, mc, gw, gh, ph);
+                ChatWindowGeometry geo = ChatWindowGeometry.compute(w, mc, gw, gh, ph, true);
                 ChatWindowGeometry.PositioningPointer ptr = ChatWindowGeometry.positioningPointerAt(mxGui, myGui, geo);
                 if (ptr != ChatWindowGeometry.PositioningPointer.NONE) {
                     hoverPtr = ptr;
@@ -231,6 +215,24 @@ public final class ChatUtilitiesTick {
         };
     }
 
+    /**
+     * {@link ChatWindowGeometry} places the window top at {@code anchorYGui - boxH} with bottom at {@code anchorYGui}
+     * when unclamped; the box must satisfy {@code boxH <= anchorYGui} so the top is not above the screen. This caps
+     * {@link ChatWindow#getMaxVisibleLines()} during vertical resize (viewport rows before max(content, viewport)).
+     */
+    private static int maxViewportLinesForAnchor(Minecraft mc, int gh, float anchorYFrac) {
+        int anchorBottom = Math.round(Mth.clamp(anchorYFrac, 0f, 1f) * gh);
+        int lh = ChatWindowGeometry.lineHeight(mc);
+        // Match compact adjust-layout chrome: LAYOUT_MODE_CONTENT_INSET top + bottom only.
+        int inset = ChatWindowGeometry.LAYOUT_MODE_CONTENT_INSET;
+        int usable = anchorBottom - 2 * inset;
+        if (usable < lh * ChatWindow.MIN_VISIBLE_LINES) {
+            return ChatWindow.MIN_VISIBLE_LINES;
+        }
+        int slots = usable / lh;
+        return Mth.clamp(slots, ChatWindow.MIN_VISIBLE_LINES, ChatWindow.MAX_VISIBLE_LINES_CAP);
+    }
+
     private static void applyDrag(
             ChatWindow w,
             DragKind kind,
@@ -240,7 +242,7 @@ public final class ChatUtilitiesTick {
             int my,
             Minecraft mc,
             List<ChatWindow> positionedWindows) {
-        int lh = ChatWindowGeometry.lineHeight();
+        int lh = ChatWindowGeometry.lineHeight(mc);
         int minWp = Math.round(ChatWindow.MIN_WIDTH_FRAC * gw);
         switch (kind) {
             case MOVE -> {
@@ -267,19 +269,28 @@ public final class ChatUtilitiesTick {
             }
             case RESIZE_N -> {
                 int dLines = Math.round((pressMy - my) / (float) lh);
-                w.setMaxVisibleLines(pressMaxLines + dLines);
+                int maxV = maxViewportLinesForAnchor(mc, gh, pressAnchorY);
+                int newLines = Mth.clamp(pressMaxLines + dLines, ChatWindow.MIN_VISIBLE_LINES, maxV);
+                w.setMaxVisibleLines(newLines);
             }
             case RESIZE_S -> {
                 int dLines = Math.round((my - pressMy) / (float) lh);
-                w.setAnchorY(pressAnchorY + dLines * lh / (float) gh);
-                w.setMaxVisibleLines(pressMaxLines + dLines);
+                float rawAy = pressAnchorY + dLines * lh / (float) gh;
+                rawAy = Mth.clamp(rawAy, 0f, 1f);
+                int maxV = maxViewportLinesForAnchor(mc, gh, rawAy);
+                int newLines = Mth.clamp(pressMaxLines + dLines, ChatWindow.MIN_VISIBLE_LINES, maxV);
+                float syncedAy = pressAnchorY + (newLines - pressMaxLines) * lh / (float) gh;
+                w.setAnchorY(Mth.clamp(syncedAy, 0f, 1f));
+                w.setMaxVisibleLines(newLines);
             }
             case RESIZE_NE -> {
                 int newW = pressBoxW + (mx - pressMx);
                 newW = Math.max(minWp, newW);
                 w.setWidthFrac(newW / (float) gw);
                 int dLines = Math.round((pressMy - my) / (float) lh);
-                w.setMaxVisibleLines(pressMaxLines + dLines);
+                int maxV = maxViewportLinesForAnchor(mc, gh, pressAnchorY);
+                int newLines = Mth.clamp(pressMaxLines + dLines, ChatWindow.MIN_VISIBLE_LINES, maxV);
+                w.setMaxVisibleLines(newLines);
                 ChatWindowLayoutSnap.snapWidthFracToGrid(w, gw);
             }
             case RESIZE_NW -> {
@@ -289,7 +300,9 @@ public final class ChatUtilitiesTick {
                 w.setAnchorX(newLeft / (float) gw);
                 w.setWidthFrac(newW / (float) gw);
                 int dLines = Math.round((pressMy - my) / (float) lh);
-                w.setMaxVisibleLines(pressMaxLines + dLines);
+                int maxV = maxViewportLinesForAnchor(mc, gh, pressAnchorY);
+                int newLines = Mth.clamp(pressMaxLines + dLines, ChatWindow.MIN_VISIBLE_LINES, maxV);
+                w.setMaxVisibleLines(newLines);
                 ChatWindowLayoutSnap.snapLeftAndWidthToGrid(w, gw);
             }
             case RESIZE_SE -> {
@@ -297,8 +310,13 @@ public final class ChatUtilitiesTick {
                 newW = Math.max(minWp, newW);
                 w.setWidthFrac(newW / (float) gw);
                 int dLines = Math.round((my - pressMy) / (float) lh);
-                w.setAnchorY(pressAnchorY + dLines * lh / (float) gh);
-                w.setMaxVisibleLines(pressMaxLines + dLines);
+                float rawAy = pressAnchorY + dLines * lh / (float) gh;
+                rawAy = Mth.clamp(rawAy, 0f, 1f);
+                int maxV = maxViewportLinesForAnchor(mc, gh, rawAy);
+                int newLines = Mth.clamp(pressMaxLines + dLines, ChatWindow.MIN_VISIBLE_LINES, maxV);
+                float syncedAy = pressAnchorY + (newLines - pressMaxLines) * lh / (float) gh;
+                w.setAnchorY(Mth.clamp(syncedAy, 0f, 1f));
+                w.setMaxVisibleLines(newLines);
                 ChatWindowLayoutSnap.snapWidthFracToGrid(w, gw);
             }
             case RESIZE_SW -> {
@@ -308,8 +326,13 @@ public final class ChatUtilitiesTick {
                 w.setAnchorX(newLeft / (float) gw);
                 w.setWidthFrac(newW / (float) gw);
                 int dLines = Math.round((my - pressMy) / (float) lh);
-                w.setAnchorY(pressAnchorY + dLines * lh / (float) gh);
-                w.setMaxVisibleLines(pressMaxLines + dLines);
+                float rawAy = pressAnchorY + dLines * lh / (float) gh;
+                rawAy = Mth.clamp(rawAy, 0f, 1f);
+                int maxV = maxViewportLinesForAnchor(mc, gh, rawAy);
+                int newLines = Mth.clamp(pressMaxLines + dLines, ChatWindow.MIN_VISIBLE_LINES, maxV);
+                float syncedAy = pressAnchorY + (newLines - pressMaxLines) * lh / (float) gh;
+                w.setAnchorY(Mth.clamp(syncedAy, 0f, 1f));
+                w.setMaxVisibleLines(newLines);
                 ChatWindowLayoutSnap.snapLeftAndWidthToGrid(w, gw);
             }
             default -> {}

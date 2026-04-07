@@ -63,6 +63,12 @@ public final class ChatUtilitiesManager {
     /** After closing the GUI for window positioning, reopen this screen (consumed when applied). */
     private Supplier<Screen> restoreScreenAfterPosition;
 
+    /**
+     * Profile id for an in-progress “Adjust Layout” session from the menu. Not persisted — keeps HUD/tick in layout mode
+     * even if per-window flags were lost on the same frame as opening chat.
+     */
+    private String layoutAdjustProfileId;
+
     private ChatUtilitiesManager() {}
 
     public static ChatUtilitiesManager get() {
@@ -74,6 +80,7 @@ public final class ChatUtilitiesManager {
         this.configPath = dir.resolve("chat-utilities.json");
         this.legacyConfigPath = dir.resolve("chat-windows.json");
         this.restoreScreenAfterPosition = null;
+        this.layoutAdjustProfileId = null;
         load();
     }
 
@@ -387,21 +394,23 @@ public final class ChatUtilitiesManager {
     }
 
     /**
-     * Puts every visible window in the given profile into positioning mode simultaneously,
-     * so all windows can be dragged at once from the Chat Windows panel.
+     * Puts every window in the given profile into positioning mode so they can be dragged from chat (including hidden
+     * windows — otherwise {@code setPositioningMode(visible)} alone left nothing to grab when all were hidden).
      */
     public void enableAllWindowsPositioning(String profileId) {
         ServerProfile profile = profilesById.get(profileId);
         if (profile == null) {
             return;
         }
+        this.layoutAdjustProfileId = profileId;
         for (ChatWindow w : profile.getWindows().values()) {
-            w.setPositioningMode(w.isVisible());
+            w.setPositioningMode(true);
         }
         save();
     }
 
     public void togglePosition(String profileId, String windowId) {
+        this.layoutAdjustProfileId = null;
         ServerProfile profile = profilesById.get(profileId);
         if (profile == null) {
             return;
@@ -420,31 +429,84 @@ public final class ChatUtilitiesManager {
         save();
     }
 
+    /**
+     * True if any window on any profile is in layout mode. Must not be limited to {@link #getActiveProfile()} —
+     * "Adjust Layout" enables positioning on the profile being edited in the menu, which may differ from the
+     * connection-matched profile (or there may be no active profile in singleplayer / before join).
+     */
     public boolean isPositioning() {
-        ServerProfile p = getActiveProfile();
-        if (p == null) {
-            return false;
+        if (layoutAdjustProfileId != null) {
+            return true;
         }
-        for (ChatWindow w : p.getWindows().values()) {
-            if (w.isPositioningMode()) {
-                return true;
+        for (ServerProfile p : profiles) {
+            for (ChatWindow w : p.getWindows().values()) {
+                if (w.isPositioningMode()) {
+                    return true;
+                }
             }
         }
         return false;
     }
 
     public void clearAllPositioningModes() {
-        ServerProfile p = getActiveProfile();
-        if (p == null) {
-            return;
-        }
-        for (ChatWindow w : p.getWindows().values()) {
-            w.setPositioningMode(false);
+        layoutAdjustProfileId = null;
+        for (ServerProfile p : profiles) {
+            for (ChatWindow w : p.getWindows().values()) {
+                w.setPositioningMode(false);
+            }
         }
     }
 
     /**
-     * Windows for HUD / positioning / scroll: only the active profile for the current connection.
+     * Gray handles / opaque layout geometry: true when the window flag is set or it belongs to the active Adjust Layout
+     * profile (session id survives one frame where flags might not).
+     */
+    public boolean showsLayoutChrome(ChatWindow w) {
+        if (w.isPositioningMode()) {
+            return true;
+        }
+        if (layoutAdjustProfileId == null) {
+            return false;
+        }
+        ServerProfile p = profilesById.get(layoutAdjustProfileId);
+        return p != null && p.getWindow(w.getId()) == w;
+    }
+
+    /**
+     * Windows in layout mode for dragging/resizing, in stable profile/window order (top-most hit-test last).
+     */
+    public List<ChatWindow> getPositioningLayoutWindows() {
+        if (layoutAdjustProfileId != null) {
+            ServerProfile p = profilesById.get(layoutAdjustProfileId);
+            if (p != null) {
+                return new ArrayList<>(p.getWindows().values());
+            }
+        }
+        List<ChatWindow> out = new ArrayList<>();
+        for (ServerProfile p : profiles) {
+            for (ChatWindow w : p.getWindows().values()) {
+                if (w.isPositioningMode()) {
+                    out.add(w);
+                }
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Windows drawn on the HUD: active connection profile normally; while arranging layout, windows from the adjust
+     * session profile or any profile with per-window layout mode.
+     */
+    public Collection<ChatWindow> getHudChatWindows() {
+        if (isPositioning()) {
+            return getPositioningLayoutWindows();
+        }
+        return getActiveProfileWindows();
+    }
+
+    /**
+     * Windows for chat routing / scroll reset / normal HUD when not in layout mode: only the active profile for the
+     * current connection.
      */
     public Collection<ChatWindow> getActiveProfileWindows() {
         ServerProfile p = getActiveProfile();
@@ -504,7 +566,7 @@ public final class ChatUtilitiesManager {
         String legacyLog = componentToLegacyLogString(message);
         MINECRAFT_GAME_LOG.info("[CHAT] {}", legacyLog.isEmpty() ? text : legacyLog);
         int tick = Minecraft.getInstance().gui.getGuiTicks();
-        ChatWindowLine entry = new ChatWindowLine(message, tick);
+        ChatWindowLine entry = ChatWindowLine.single(message, tick);
         for (ChatWindow w : profile.getWindows().values()) {
             if (w.matches(text)) {
                 w.addLine(entry);

@@ -12,14 +12,13 @@ import net.minecraft.client.gui.screens.ChatScreen;
 import net.minecraft.client.gui.screens.inventory.tooltip.ClientTooltipComponent;
 import net.minecraft.client.gui.screens.inventory.tooltip.DefaultTooltipPositioner;
 import net.minecraft.network.chat.Component;
+import net.minecraft.util.ARGB;
 import net.minecraft.util.FormattedCharSequence;
 import net.minecraft.util.Mth;
 
 import java.util.List;
 
 public final class ChatUtilitiesHud {
-    /** Same alpha as vanilla chat line backing ({@code 0x80000000}). */
-    private static final int CHAT_BACKDROP_BASE_ALPHA = 128;
 
     private ChatUtilitiesHud() {}
 
@@ -33,6 +32,34 @@ public final class ChatUtilitiesHud {
         if (mc.options.hideGui || mc.debugEntries.isOverlayVisible()) {
             return;
         }
+        // ChatScreen draws after the HUD pass; layout windows sit near the chat area and would be fully covered.
+        // {@link me.braydon.chatutilities.mixin.client.ChatScreenMixin} paints them at render TAIL instead.
+        if (mc.screen instanceof ChatScreen && ChatUtilitiesManager.get().isPositioning()) {
+            return;
+        }
+
+        renderChatWindowsLayer(graphics, deltaTracker);
+    }
+
+    /**
+     * Called from {@link net.minecraft.client.gui.screens.ChatScreen} render TAIL while adjusting layout so windows
+     * and guidelines appear above the chat UI.
+     */
+    public static void renderPositioningOverChatScreen(GuiGraphics graphics, DeltaTracker deltaTracker) {
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.options.hideGui || mc.debugEntries.isOverlayVisible()) {
+            return;
+        }
+        if (!ChatUtilitiesManager.get().isPositioning()) {
+            return;
+        }
+        // Do not call disableScissor() in a loop: the stack is often shallow (or empty), and extra pops crash with
+        // IllegalStateException: Scissor stack underflow (see ChatScreen render TAIL).
+        renderChatWindowsLayer(graphics, deltaTracker);
+    }
+
+    private static void renderChatWindowsLayer(GuiGraphics graphics, DeltaTracker deltaTracker) {
+        Minecraft mc = Minecraft.getInstance();
 
         int gw = mc.getWindow().getGuiScaledWidth();
         int gh = mc.getWindow().getGuiScaledHeight();
@@ -44,25 +71,27 @@ public final class ChatUtilitiesHud {
         float chatOpacity = mc.options.chatOpacity().get().floatValue();
 
         ChatUtilitiesManager mgr = ChatUtilitiesManager.get();
-        for (ChatWindow window : mgr.getActiveProfileWindows()) {
-            if (!window.isVisible()) {
+        for (ChatWindow window : mgr.getHudChatWindows()) {
+            boolean layoutChrome = mgr.showsLayoutChrome(window);
+            if (!window.isVisible() && !(mgr.isPositioning() && layoutChrome)) {
                 continue;
             }
 
             boolean hasStored = !window.getLines().isEmpty();
-            if (!hasStored && !window.isPositioningMode() && !chatOpen) {
+            if (!hasStored && !layoutChrome && !chatOpen) {
                 continue;
             }
 
             Component placeholder = null;
             if (!hasStored) {
                 placeholder =
-                        window.isPositioningMode()
+                        layoutChrome
                                 ? Component.literal("[empty]")
                                 : Component.literal("No matching chat yet")
                                         .withStyle(ChatFormatting.GRAY, ChatFormatting.ITALIC);
             }
 
+            // Layout frame always uses configured bounds (not content-tight); matches tick/snap hit-tests.
             ChatWindowGeometry geo =
                     ChatWindowGeometry.compute(
                             window,
@@ -71,16 +100,18 @@ public final class ChatUtilitiesHud {
                             gh,
                             placeholder,
                             guiTick,
-                            window.isPositioningMode(),
+                            layoutChrome,
                             chatOpen,
                             mx,
-                            my);
+                            my,
+                            false,
+                            layoutChrome);
 
-            if (!hasStored && geo.rows.isEmpty()) {
+            if (!hasStored && geo.rows.isEmpty() && !layoutChrome) {
                 continue;
             }
 
-            if (hasStored && geo.rows.isEmpty() && !chatOpen && !window.isPositioningMode()) {
+            if (hasStored && geo.rows.isEmpty() && !chatOpen && !layoutChrome) {
                 continue;
             }
 
@@ -89,26 +120,53 @@ public final class ChatUtilitiesHud {
             int boxW = geo.boxW;
             int boxH = geo.boxH;
 
-            if (window.isPositioningMode()) {
-                graphics.fill(x - 1, y - 1, x + boxW + 1, y + boxH + 1, 0x66C8C8C8);
+            if (layoutChrome) {
+                int inset = ChatWindowGeometry.LAYOUT_MODE_CONTENT_INSET;
+                // Full outline rect filled (padding strip matches row backdrop base color).
+                int frameL = x;
+                int frameT = y;
+                int frameR = x + boxW;
+                int frameB = y + boxH;
+                if (frameR > frameL && frameB > frameT) {
+                    float textBg = mc.options.textBackgroundOpacity().get().floatValue();
+                    // One layer only (no per-row strips): matches HUD chat panel opacity, avoids darker “row bands”.
+                    int filler = ARGB.black(Mth.clamp(textBg * chatOpacity, 0f, 1f));
+                    graphics.fill(frameL, frameT, frameR, frameB, filler);
+                    int innerL = x + inset;
+                    int innerT = y + inset;
+                    int innerR = x + boxW - inset;
+                    int innerB = y + boxH - inset;
+                    if (innerR > innerL && innerB > innerT) {
+                        graphics.enableScissor(innerL, innerT, innerR, innerB);
+                    } else {
+                        graphics.enableScissor(frameL, frameT, frameR, frameB);
+                    }
+                    try {
+                        if (hasStored) {
+                            renderStyledRows(
+                                    graphics, mc, geo, x, y, boxW, boxH, chatOpacity, true);
+                        } else {
+                            renderPlaceholderRows(
+                                    graphics, mc, geo, x, y, boxW, boxH, 0xAAAAAA, chatOpacity, true);
+                        }
+                    } finally {
+                        graphics.disableScissor();
+                    }
+                }
+                // Geometry hit-tests use (x,y,boxW,boxH); outline flush with that rect.
+                int edge = 0xFF8A8A98;
+                graphics.renderOutline(x, y, boxW, boxH, edge);
                 int hintLen = Math.min(12, Math.min(boxW, boxH) / 2);
                 if (hintLen >= 3) {
                     int hi = 0xFFFFFFFF;
                     graphics.fill(x + boxW - hintLen, y + boxH - 2, x + boxW, y + boxH - 1, hi);
                     graphics.fill(x + boxW - 2, y + boxH - hintLen, x + boxW - 1, y + boxH, hi);
                 }
-            }
-
-            if (hasStored) {
-                fillChatWindowBackdrop(graphics, x, y, boxW, boxH, chatOpacity);
-                renderStyledRows(graphics, mc, geo, x, y, boxW, boxH, chatOpacity);
+            } else if (hasStored) {
+                renderStyledRows(graphics, mc, geo, x, y, boxW, boxH, chatOpacity, false);
                 ChatWindowScrollbar.render(graphics, mc, window, geo, chatOpacity, chatOpen);
-            } else if (window.isPositioningMode()) {
-                fillChatWindowBackdrop(graphics, x, y, boxW, boxH, chatOpacity);
-                renderPlaceholderRows(graphics, mc, geo, x, y, boxW, boxH, 0xAAAAAA, chatOpacity);
             } else {
-                fillChatWindowBackdrop(graphics, x, y, boxW, boxH, chatOpacity);
-                renderStyledRows(graphics, mc, geo, x, y, boxW, boxH, chatOpacity);
+                renderStyledRows(graphics, mc, geo, x, y, boxW, boxH, chatOpacity, false);
             }
         }
 
@@ -136,20 +194,26 @@ public final class ChatUtilitiesHud {
     }
 
     /**
-     * Single semi-transparent rectangle behind the window, matching vanilla chat HUD: one uniform
-     * alpha for the whole panel. Line fade is applied to text only in {@link #renderStyledRows}.
+     * Per-line backdrop like vanilla HUD chat pass 1: {@code fill(-4, rowTop, rowInnerWidth + 8, rowBottom,
+     * ARGB.black(lineOpacity * textBackgroundOpacity))} in chat-local space; here {@code tx} is the text origin.
      */
-    private static void fillChatWindowBackdrop(
+    private static void fillVanillaStyleChatRowBackdrop(
             GuiGraphics graphics,
-            int x,
-            int y,
-            int boxW,
-            int boxH,
-            float chatOpacity) {
-        int a = Mth.clamp(Math.round(CHAT_BACKDROP_BASE_ALPHA * chatOpacity), 0, 255);
-        graphics.fill(x, y, x + boxW, y + boxH, (a << 24));
+            Minecraft mc,
+            int tx,
+            int rowTop,
+            int innerWidth,
+            int rowBottom,
+            float lineOpacity) {
+        float textBg = mc.options.textBackgroundOpacity().get().floatValue();
+        float a = Mth.clamp(lineOpacity * textBg, 0f, 1f);
+        int argb = ARGB.black(a);
+        graphics.fill(tx - 4, rowTop, tx + innerWidth + 8, rowBottom, argb);
     }
 
+    /**
+     * @param layoutPreview when true, caller scissored to inner rect; use {@link ChatWindowGeometry#LAYOUT_MODE_CONTENT_INSET}.
+     */
     private static void renderStyledRows(
             GuiGraphics graphics,
             Minecraft mc,
@@ -158,19 +222,37 @@ public final class ChatUtilitiesHud {
             int y,
             int boxW,
             int boxH,
-            float chatOpacity) {
-        graphics.enableScissor(x, y, x + boxW, y + boxH);
+            float chatOpacity,
+            boolean layoutPreview) {
+        boolean ownScissor = !layoutPreview;
+        if (ownScissor) {
+            graphics.enableScissor(x, y, x + boxW, y + boxH);
+        }
         try {
-            int tx = x + ChatWindowGeometry.padding();
-            int ty = y + ChatWindowGeometry.padding() + geo.contentStartYOffset;
+            int pad = layoutPreview ? ChatWindowGeometry.LAYOUT_MODE_CONTENT_INSET : ChatWindowGeometry.padding();
+            int tx = x + pad;
+            int innerW = boxW - 2 * pad;
+            int lh = geo.lineHeight();
+            int ty =
+                    y
+                            + pad
+                            + (layoutPreview ? 0 : ChatWindowGeometry.CONTENT_TOP_INSET)
+                            + geo.contentStartYOffset;
             for (ChatWindowGeometry.RenderedRow row : geo.rows) {
+                int rowBottom = ty + lh;
+                if (!layoutPreview) {
+                    fillVanillaStyleChatRowBackdrop(graphics, mc, tx, ty, innerW, rowBottom, row.alpha);
+                }
                 float a = Mth.clamp(row.alpha * chatOpacity, 0f, 1f);
                 int color = ChatWindowGeometry.argbText(a, 0xFFFFFF);
-                graphics.drawString(mc.font, row.text, tx, ty, color, ChatUtilitiesClientOptions.isChatTextShadow());
-                ty += ChatWindowGeometry.lineHeight();
+                int drawY = ty + row.slideYOffset + ChatWindowGeometry.ROW_TEXT_TOP_NUDGE;
+                graphics.drawString(mc.font, row.text, tx, drawY, color, ChatUtilitiesClientOptions.isChatTextShadow());
+                ty = rowBottom;
             }
         } finally {
-            graphics.disableScissor();
+            if (ownScissor) {
+                graphics.disableScissor();
+            }
         }
     }
 
@@ -183,24 +265,43 @@ public final class ChatUtilitiesHud {
             int boxW,
             int boxH,
             int rgb,
-            float chatOpacity) {
-        graphics.enableScissor(x, y, x + boxW, y + boxH);
+            float chatOpacity,
+            boolean layoutPreview) {
+        boolean ownScissor = !layoutPreview;
+        if (ownScissor) {
+            graphics.enableScissor(x, y, x + boxW, y + boxH);
+        }
         try {
-            int ty = y + ChatWindowGeometry.padding() + geo.contentStartYOffset;
+            int pad = layoutPreview ? ChatWindowGeometry.LAYOUT_MODE_CONTENT_INSET : ChatWindowGeometry.padding();
+            int tx = x + pad;
+            int innerW = boxW - 2 * pad;
+            int lh = geo.lineHeight();
+            int ty =
+                    y
+                            + pad
+                            + (layoutPreview ? 0 : ChatWindowGeometry.CONTENT_TOP_INSET)
+                            + geo.contentStartYOffset;
             for (ChatWindowGeometry.RenderedRow row : geo.rows) {
+                int rowBottom = ty + lh;
+                if (!layoutPreview) {
+                    fillVanillaStyleChatRowBackdrop(graphics, mc, tx, ty, innerW, rowBottom, row.alpha);
+                }
                 float a = Mth.clamp(row.alpha * chatOpacity, 0f, 1f);
                 int color = ChatWindowGeometry.argbText(a, rgb);
+                int drawY = ty + row.slideYOffset + ChatWindowGeometry.ROW_TEXT_TOP_NUDGE;
                 graphics.drawString(
                         mc.font,
                         row.text,
-                        x + ChatWindowGeometry.padding(),
-                        ty,
+                        tx,
+                        drawY,
                         color,
                         ChatUtilitiesClientOptions.isChatTextShadow());
-                ty += ChatWindowGeometry.lineHeight();
+                ty = rowBottom;
             }
         } finally {
-            graphics.disableScissor();
+            if (ownScissor) {
+                graphics.disableScissor();
+            }
         }
     }
 }

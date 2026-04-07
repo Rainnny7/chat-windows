@@ -64,6 +64,14 @@ public final class VanillaChatLinePicker {
 
     private VanillaChatLinePicker() {}
 
+    /**
+     * While true, {@link me.braydon.chatutilities.mixin.client.ChatComponentMixin} skips smooth-chat fade on line
+     * opacity so hit-testing still sees full alpha (picker uses {@code AlphaCalculator.FULLY_VISIBLE}).
+     */
+    public static boolean isPickCaptureActive() {
+        return PICK_CAPTURE.get() != null;
+    }
+
     /** Called from {@link me.braydon.chatutilities.mixin.client.ChatComponentMixin} around each chat line. */
     public static void notifyLineDuringPick(GuiMessage.Line line, int lineIndex, float opacity) {
         PickerState state = PICK_CAPTURE.get();
@@ -149,7 +157,8 @@ public final class VanillaChatLinePicker {
             if (seq == null || FormattedCharSequence.EMPTY.equals(seq)) {
                 return;
             }
-            int rowBottom = this.chatBottom - lineIndex * this.entryHeight;
+            int slide = ChatSmoothAppearance.fadeSlideOffsetYPixels(line.addedTime());
+            int rowBottom = this.chatBottom - lineIndex * this.entryHeight + slide;
             int rowTop = rowBottom - this.entryHeight;
             if (localMouseX < -4 || localMouseX >= rowInnerWidth + 8) {
                 return;

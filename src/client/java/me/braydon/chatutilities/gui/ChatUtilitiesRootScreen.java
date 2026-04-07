@@ -9,20 +9,25 @@ import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
+import net.minecraft.client.gui.components.AbstractSliderButton;
 import net.minecraft.client.gui.components.AbstractWidget;
 import net.minecraft.client.gui.components.EditBox;
+import net.minecraft.client.gui.components.Renderable;
 import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.components.events.GuiEventListener;
 import net.minecraft.client.gui.components.toasts.SystemToast;
 import net.minecraft.client.gui.narration.NarrationElementOutput;
 import net.minecraft.client.gui.screens.ChatScreen;
 import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.client.resources.language.I18n;
 import net.minecraft.client.input.KeyEvent;
 import net.minecraft.client.input.MouseButtonEvent;
 import net.minecraft.client.input.MouseButtonInfo;
 import net.minecraft.client.renderer.RenderPipelines;
 import net.minecraft.client.resources.sounds.SimpleSoundInstance;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.MutableComponent;
+import net.minecraft.network.chat.contents.PlainTextContents;
 import net.minecraft.resources.Identifier;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.util.Mth;
@@ -51,7 +56,7 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
     private static final int MARGIN_X = 42;
     private static final int MARGIN_Y = 28;
     /** Width of the left sidebar within the panel. */
-    private static final int SIDEBAR_W = 185;
+    private static final int SIDEBAR_W = 168;
     /** Height of the top “Chat Utilities” strip in the sidebar. */
     private static final int SIDEBAR_TITLE_H = 30;
     private static final String SIDEBAR_AUTHOR_LINK = "https://github.com/Rainnny7";
@@ -78,6 +83,9 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
     private static final int HEADER_BODY_GAP   = 10;
     /** Vertical gap between Settings subsections (Controls / Settings / Profiles). */
     private static final int SETTINGS_SECTION_GAP = 20;
+
+    /** Pixels per mouse-wheel step for the Settings form when it overflows the viewport. */
+    private static final int SETTINGS_SCROLL_STEP = 28;
     /** Cap for Edit Profile + Chat Sounds: every input/button in those panels shares this width. */
     private static final int PROFILE_SOUNDS_FORM_MAX_W = 280;
 
@@ -100,6 +108,8 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
     private static final int C_PROFILE_SEL    = 0xFF12203A;
     private static final int C_ACTIVE_BG      = 0xFF0E1C36;
     private static final int C_ACCENT         = 0xFF3A9FE0;
+    /** Fixed blue for global sidebar rows (e.g. Settings); server profile rows use favicon tint instead. */
+    private static final int SIDEBAR_GLOBAL_ACCENT_RGB = C_ACCENT & 0xFFFFFF;
     private static final int C_HOVER          = 0x18FFFFFF;
     private static final int C_PROFILE_NAME   = 0xFFEEEEEE;
     private static final int C_PROFILE_DETAIL = 0xFF888898;
@@ -129,6 +139,14 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
     // Per-panel scroll positions (survive resize-triggered init() calls)
     private int serverScroll, winScroll, ignScroll, ruleScroll;
 
+    /** Vertical scroll offset (px) for Settings content between {@link #bodyY()} and the footer strip. */
+    private int settingsContentScroll;
+
+    /** Settings widgets drawn inside the scroll viewport (clipped); excludes Done + Reset All. */
+    private final List<Renderable> settingsScrollClipRenderables = new ArrayList<>();
+    /** On Settings: Done + Reset All — drawn outside the scroll scissor (same order as widget registration). */
+    private final List<Renderable> settingsNonClipRenderables = new ArrayList<>();
+
     /** Hit box for the “Rainnny” author link in the sidebar header (updated each render). */
     private int sidebarAuthorLinkL, sidebarAuthorLinkR, sidebarAuthorLinkT, sidebarAuthorLinkB;
 
@@ -137,6 +155,8 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
 
     /** 0 = not armed; otherwise deadline (ms) for second click to delete profile. */
     private long deleteProfileConfirmDeadlineMs;
+    /** Settings panel: deadline (ms) for second click to reset all options and controls. */
+    private long resetDefaultsConfirmDeadlineMs;
     /** Per window id: deadline (ms) for second click to remove. */
     private final Map<String, Long> removeWindowConfirmDeadlines = new HashMap<>();
 
@@ -363,6 +383,11 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
     @Override
     protected void init() {
         clearWidgets();
+        settingsScrollClipRenderables.clear();
+        settingsNonClipRenderables.clear();
+        if (activePanel != Panel.SETTINGS) {
+            settingsContentScroll = 0;
+        }
         sugFiltered = List.of();
         pendingPatternEdits.clear();
         pendingNewPatterns.clear();
@@ -410,12 +435,17 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
             rebindingOpenMenuKey = false;
             rebindingCopyPlain = false;
             rebindingCopyFormatted = false;
+            resetDefaultsConfirmDeadlineMs = 0;
         }
 
         // Done button — always at bottom-right of content area
-        addRenderableWidget(primaryButton(
+        AbstractWidget doneButton = primaryButton(
                 Component.literal("Done"), () -> onClose(),
-                contentRight() - 80, footerY(), 80, 20));
+                contentRight() - 80, footerY(), 80, 20);
+        addRenderableWidget(doneButton);
+        if (activePanel == Panel.SETTINGS) {
+            settingsNonClipRenderables.add(doneButton);
+        }
 
         switch (activePanel) {
             case EDIT_PROFILE -> buildEditProfileWidgets();
@@ -445,6 +475,12 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         if (deleteProfileConfirmDeadlineMs != 0 && now >= deleteProfileConfirmDeadlineMs) {
             deleteProfileConfirmDeadlineMs = 0;
             if (activePanel == Panel.EDIT_PROFILE) {
+                refresh = true;
+            }
+        }
+        if (resetDefaultsConfirmDeadlineMs != 0 && now >= resetDefaultsConfirmDeadlineMs) {
+            resetDefaultsConfirmDeadlineMs = 0;
+            if (activePanel == Panel.SETTINGS) {
                 refresh = true;
             }
         }
@@ -1272,7 +1308,8 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
     }
 
     private void buildSettingsWidgets() {
-        int y = settingsFormBodyY();
+        settingsContentScroll = Mth.clamp(settingsContentScroll, 0, settingsMaxContentScroll());
+        int y = settingsScrolledY(settingsFormBodyY());
         int keyBtnW = 160;
         int keyBtnX = contentRight() - keyBtnW;
 
@@ -1326,42 +1363,44 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                 };
         openMenuKeyButton.setTooltip(
                 Tooltip.create(Component.translatable("chat-utilities.settings.open_menu.tooltip")));
-        addRenderableWidget(openMenuKeyButton);
+        addSettingsScrollClipWidget(openMenuKeyButton);
         y += 28;
 
-        addRenderableWidget(flatButtonCopyMouseBinding(keyBtnX, y, keyBtnW, 22, true));
+        addSettingsScrollClipWidget(flatButtonCopyMouseBinding(keyBtnX, y, keyBtnW, 22, true));
         y += 28;
-        addRenderableWidget(flatButtonCopyMouseBinding(keyBtnX, y, keyBtnW, 22, false));
-        y += 28;
+        addSettingsScrollClipWidget(flatButtonCopyMouseBinding(keyBtnX, y, keyBtnW, 22, false));
 
-        AbstractWidget resetControls =
-                flatButton(Component.literal("Reset to default"), () -> {
-                    KeyMapping km = ChatUtilitiesModClient.OPEN_MENU_KEY;
-                    km.setKey(km.getDefaultKey());
-                    KeyMapping.resetMapping();
-                    saveOptions();
-                    rebindingOpenMenuKey = false;
-                    rebindingCopyPlain = false;
-                    rebindingCopyFormatted = false;
-                    init();
-                }, keyBtnX, y, keyBtnW, 20);
-        resetControls.setTooltip(
-                Tooltip.create(Component.translatable("chat-utilities.settings.reset_controls.tooltip")));
-        addRenderableWidget(resetControls);
+        int clickCopyY = settingsScrolledY(settingsClickToCopyRowY());
+        addSettingsScrollClipWidget(flatButtonClickToCopy(keyBtnX, clickCopyY, keyBtnW, 22));
 
-        int clickCopyY = settingsClickToCopyRowY();
-        addRenderableWidget(flatButtonClickToCopy(keyBtnX, clickCopyY, keyBtnW, 22));
+        int fmtStyleY = settingsScrolledY(settingsCopyFormattedStyleRowY());
+        addSettingsScrollClipWidget(flatButtonCopyFormattedStyle(keyBtnX, fmtStyleY, keyBtnW, 22));
 
-        int fmtStyleY = settingsCopyFormattedStyleRowY();
-        addRenderableWidget(flatButtonCopyFormattedStyle(keyBtnX, fmtStyleY, keyBtnW, 22));
+        int symY = settingsScrolledY(settingsSymbolSelectorRowY());
+        addSettingsScrollClipWidget(flatButtonSymbolSelector(keyBtnX, symY, keyBtnW, 22));
 
-        int symY = settingsSymbolSelectorRowY();
-        addRenderableWidget(flatButtonSymbolSelector(keyBtnX, symY, keyBtnW, 22));
+        int shadowY = settingsScrolledY(settingsShadowRowY());
+        addSettingsScrollClipWidget(flatButtonChatTextShadow(keyBtnX, shadowY, keyBtnW, 22));
 
-        int shadowY = settingsShadowRowY();
-        addRenderableWidget(flatButtonChatTextShadow(keyBtnX, shadowY, keyBtnW, 22));
+        int smoothY = settingsScrolledY(settingsSmoothChatRowY());
+        addSettingsScrollClipWidget(flatButtonSmoothChat(keyBtnX, smoothY, keyBtnW, 22));
 
-        int profY = settingsProfilesFormY();
+        int smoothDelayY = settingsScrolledY(settingsSmoothChatDelayRowY());
+        addSettingsScrollClipWidget(smoothChatFadeMsSlider(keyBtnX, smoothDelayY, keyBtnW, 22));
+
+        int smoothBarY = settingsScrolledY(settingsSmoothChatBarOpenRowY());
+        addSettingsScrollClipWidget(smoothChatBarOpenMsSlider(keyBtnX, smoothBarY, keyBtnW, 22));
+
+        int longerHistY = settingsScrolledY(settingsLongerChatHistoryRowY());
+        addSettingsScrollClipWidget(flatButtonLongerChatHistory(keyBtnX, longerHistY, keyBtnW, 22));
+
+        int histLimitY = settingsScrolledY(settingsChatHistoryLimitRowY());
+        addSettingsScrollClipWidget(chatHistoryLimitSlider(keyBtnX, histLimitY, keyBtnW, 22));
+
+        int stackRepY = settingsScrolledY(settingsStackRepeatedMessagesRowY());
+        addSettingsScrollClipWidget(flatButtonStackRepeatedMessages(keyBtnX, stackRepY, keyBtnW, 22));
+
+        int profY = settingsScrolledY(settingsProfilesFormY());
         int gap = 8;
         int btnW = 132;
         int leftX = contentLeft();
@@ -1375,7 +1414,7 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                         20);
         importBtn.setTooltip(
                 Tooltip.create(Component.translatable("chat-utilities.settings.import_profiles.tooltip")));
-        addRenderableWidget(importBtn);
+        addSettingsScrollClipWidget(importBtn);
         AbstractWidget exportBtn =
                 flatButton(
                         Component.literal("⬇ Export Profiles"),
@@ -1386,7 +1425,48 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                         20);
         exportBtn.setTooltip(
                 Tooltip.create(Component.translatable("chat-utilities.settings.export_profiles.tooltip")));
-        addRenderableWidget(exportBtn);
+        addSettingsScrollClipWidget(exportBtn);
+
+        long nowReset = System.currentTimeMillis();
+        boolean resetArmed = resetDefaultsConfirmDeadlineMs > nowReset;
+        int resetW = 200;
+        AbstractWidget resetAllBtn =
+                flatButtonDestructive(
+                        Component.translatable(
+                                resetArmed
+                                        ? "chat-utilities.settings.reset_all.confirm"
+                                        : "chat-utilities.settings.reset_all"),
+                        () -> {
+                            long t = System.currentTimeMillis();
+                            if (resetDefaultsConfirmDeadlineMs > t) {
+                                resetDefaultsConfirmDeadlineMs = 0;
+                                ChatUtilitiesClientOptions.resetAllToDefaults();
+                                KeyMapping km = ChatUtilitiesModClient.OPEN_MENU_KEY;
+                                km.setKey(km.getDefaultKey());
+                                KeyMapping.resetMapping();
+                                saveOptions();
+                                rebindingOpenMenuKey = false;
+                                rebindingCopyPlain = false;
+                                rebindingCopyFormatted = false;
+                                showSettingsToast(
+                                        Component.translatable("chat-utilities.settings.reset_all.toast.title")
+                                                .getString(),
+                                        Component.translatable("chat-utilities.settings.reset_all.toast.detail")
+                                                .getString());
+                                init();
+                            } else {
+                                resetDefaultsConfirmDeadlineMs = t + DESTRUCTIVE_CONFIRM_MS;
+                                init();
+                            }
+                        },
+                        contentLeft(),
+                        footerY(),
+                        resetW,
+                        20);
+        resetAllBtn.setTooltip(
+                Tooltip.create(Component.translatable("chat-utilities.settings.reset_all.tooltip")));
+        addRenderableWidget(resetAllBtn);
+        settingsNonClipRenderables.add(resetAllBtn);
     }
 
     private AbstractWidget flatButtonSymbolSelector(int x, int y, int w, int h) {
@@ -1447,8 +1527,16 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                         g.renderOutline(getX(), getY(), getWidth(), getHeight(), outline);
                         Component cap =
                                 switch (ChatUtilitiesClientOptions.getCopyFormattedStyle()) {
-                                    case SECTION_SYMBOL -> Component.translatable(
-                                            "chat-utilities.settings.copy_formatted_style.value.section_symbol");
+                                    case VANILLA -> Component.translatable(
+                                            "chat-utilities.settings.copy_formatted_style.value.vanilla");
+                                    case SECTION_SYMBOL ->
+                                            // § before ) is parsed as legacy formatting and can eat the ")"; §§ → one literal §.
+                                            MutableComponent.create(
+                                                    PlainTextContents.create(
+                                                            I18n.get(
+                                                                    "chat-utilities.settings.copy_formatted_style.value.section_symbol.lead")
+                                                                    + "\u00A7\u00A7"
+                                                                    + ")"));
                                     case MINIMESSAGE -> Component.translatable(
                                             "chat-utilities.settings.copy_formatted_style.value.minimessage");
                                 };
@@ -1508,6 +1596,240 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         sh.setTooltip(
                 Tooltip.create(Component.translatable("chat-utilities.settings.chat_text_shadow.tooltip")));
         return sh;
+    }
+
+    private AbstractWidget flatButtonSmoothChat(int x, int y, int w, int h) {
+        AbstractWidget btn =
+                new AbstractWidget(x, y, w, h, Component.empty()) {
+                    @Override
+                    public void onClick(MouseButtonEvent event, boolean dbl) {
+                        ChatUtilitiesClientOptions.toggleSmoothChat();
+                        init();
+                    }
+
+                    @Override
+                    protected void renderWidget(GuiGraphics g, int mx, int my, float pt) {
+                        boolean on = ChatUtilitiesClientOptions.isSmoothChat();
+                        boolean hov = this.isHovered();
+                        boolean act = this.active;
+                        int bg = !act ? 0x25000000 : hov ? 0x55FFFFFF : 0x35000000;
+                        int outline = !act ? 0x25FFFFFF : hov ? 0x70FFFFFF : 0x40FFFFFF;
+                        g.fill(getX(), getY(), getX() + getWidth(), getY() + getHeight(), bg);
+                        g.renderOutline(getX(), getY(), getWidth(), getHeight(), outline);
+                        Component cap = Component.literal(on ? "Enabled" : "Disabled");
+                        int tc = on ? 0xFF55FF55 : 0xFFFF5555;
+                        g.drawCenteredString(
+                                Minecraft.getInstance().font,
+                                cap,
+                                getX() + getWidth() / 2,
+                                getY() + (getHeight() - 8) / 2,
+                                tc);
+                    }
+
+                    @Override
+                    public void updateWidgetNarration(NarrationElementOutput n) {
+                        defaultButtonNarrationText(n);
+                    }
+                };
+        btn.setTooltip(Tooltip.create(Component.translatable("chat-utilities.settings.smooth_chat.tooltip")));
+        return btn;
+    }
+
+    private static int snapSmoothChatSliderMs(int ms) {
+        int step = ChatUtilitiesClientOptions.SMOOTH_CHAT_SLIDER_STEP_MS;
+        int min = ChatUtilitiesClientOptions.SMOOTH_CHAT_FADE_MS_MIN;
+        int max = ChatUtilitiesClientOptions.SMOOTH_CHAT_FADE_MS_MAX;
+        int snapped = min + Math.round((ms - min) / (float) step) * step;
+        return Mth.clamp(snapped, min, max);
+    }
+
+    private AbstractWidget smoothChatFadeMsSlider(int x, int y, int w, int h) {
+        int min = ChatUtilitiesClientOptions.SMOOTH_CHAT_FADE_MS_MIN;
+        int max = ChatUtilitiesClientOptions.SMOOTH_CHAT_FADE_MS_MAX;
+        int cur = snapSmoothChatSliderMs(ChatUtilitiesClientOptions.getSmoothChatFadeMs());
+        double initial = (cur - min) / (double) (max - min);
+        AbstractSliderButton slider =
+                new AbstractSliderButton(x, y, w, h, Component.empty(), initial) {
+                    {
+                        updateMessage();
+                    }
+
+                    @Override
+                    protected void updateMessage() {
+                        setMessage(Component.literal(msFromSlider() + " ms"));
+                    }
+
+                    private int msFromSlider() {
+                        return Mth.clamp(
+                                (int) Math.round(Mth.lerp(value, min, max)), min, max);
+                    }
+
+                    @Override
+                    protected void applyValue() {
+                        int snapped = snapSmoothChatSliderMs(msFromSlider());
+                        value = (snapped - min) / (double) (max - min);
+                        ChatUtilitiesClientOptions.setSmoothChatFadeMs(snapped);
+                        updateMessage();
+                    }
+                };
+        slider.setTooltip(
+                Tooltip.create(Component.translatable("chat-utilities.settings.smooth_chat_delay.tooltip")));
+        slider.active = ChatUtilitiesClientOptions.isSmoothChat();
+        return slider;
+    }
+
+    private AbstractWidget smoothChatBarOpenMsSlider(int x, int y, int w, int h) {
+        int min = ChatUtilitiesClientOptions.SMOOTH_CHAT_FADE_MS_MIN;
+        int max = ChatUtilitiesClientOptions.SMOOTH_CHAT_FADE_MS_MAX;
+        int cur = snapSmoothChatSliderMs(ChatUtilitiesClientOptions.getSmoothChatBarOpenMs());
+        double initial = (cur - min) / (double) (max - min);
+        AbstractSliderButton slider =
+                new AbstractSliderButton(x, y, w, h, Component.empty(), initial) {
+                    {
+                        updateMessage();
+                    }
+
+                    @Override
+                    protected void updateMessage() {
+                        setMessage(Component.literal(msFromSlider() + " ms"));
+                    }
+
+                    private int msFromSlider() {
+                        return Mth.clamp(
+                                (int) Math.round(Mth.lerp(value, min, max)), min, max);
+                    }
+
+                    @Override
+                    protected void applyValue() {
+                        int snapped = snapSmoothChatSliderMs(msFromSlider());
+                        value = (snapped - min) / (double) (max - min);
+                        ChatUtilitiesClientOptions.setSmoothChatBarOpenMs(snapped);
+                        updateMessage();
+                    }
+                };
+        slider.setTooltip(
+                Tooltip.create(Component.translatable("chat-utilities.settings.smooth_chat_bar_open.tooltip")));
+        slider.active = ChatUtilitiesClientOptions.isSmoothChat();
+        return slider;
+    }
+
+    private static int snapChatHistoryLimitLines(int lines) {
+        int step = ChatUtilitiesClientOptions.CHAT_HISTORY_LIMIT_STEP;
+        int min = ChatUtilitiesClientOptions.CHAT_HISTORY_LIMIT_MIN;
+        int max = ChatUtilitiesClientOptions.CHAT_HISTORY_LIMIT_MAX;
+        int snapped = min + Math.round((lines - min) / (float) step) * step;
+        return Mth.clamp(snapped, min, max);
+    }
+
+    private AbstractWidget flatButtonLongerChatHistory(int x, int y, int w, int h) {
+        AbstractWidget btn =
+                new AbstractWidget(x, y, w, h, Component.empty()) {
+                    @Override
+                    public void onClick(MouseButtonEvent event, boolean dbl) {
+                        ChatUtilitiesClientOptions.toggleLongerChatHistory();
+                        init();
+                    }
+
+                    @Override
+                    protected void renderWidget(GuiGraphics g, int mx, int my, float pt) {
+                        boolean on = ChatUtilitiesClientOptions.isLongerChatHistory();
+                        boolean hov = this.isHovered();
+                        boolean act = this.active;
+                        int bg = !act ? 0x25000000 : hov ? 0x55FFFFFF : 0x35000000;
+                        int outline = !act ? 0x25FFFFFF : hov ? 0x70FFFFFF : 0x40FFFFFF;
+                        g.fill(getX(), getY(), getX() + getWidth(), getY() + getHeight(), bg);
+                        g.renderOutline(getX(), getY(), getWidth(), getHeight(), outline);
+                        Component cap = Component.literal(on ? "Enabled" : "Disabled");
+                        int tc = on ? 0xFF55FF55 : 0xFFFF5555;
+                        g.drawCenteredString(
+                                Minecraft.getInstance().font,
+                                cap,
+                                getX() + getWidth() / 2,
+                                getY() + (getHeight() - 8) / 2,
+                                tc);
+                    }
+
+                    @Override
+                    public void updateWidgetNarration(NarrationElementOutput n) {
+                        defaultButtonNarrationText(n);
+                    }
+                };
+        btn.setTooltip(
+                Tooltip.create(Component.translatable("chat-utilities.settings.longer_chat_history.tooltip")));
+        return btn;
+    }
+
+    private AbstractWidget flatButtonStackRepeatedMessages(int x, int y, int w, int h) {
+        AbstractWidget btn =
+                new AbstractWidget(x, y, w, h, Component.empty()) {
+                    @Override
+                    public void onClick(MouseButtonEvent event, boolean dbl) {
+                        ChatUtilitiesClientOptions.toggleStackRepeatedMessages();
+                        init();
+                    }
+
+                    @Override
+                    protected void renderWidget(GuiGraphics g, int mx, int my, float pt) {
+                        boolean on = ChatUtilitiesClientOptions.isStackRepeatedMessages();
+                        boolean hov = this.isHovered();
+                        boolean act = this.active;
+                        int bg = !act ? 0x25000000 : hov ? 0x55FFFFFF : 0x35000000;
+                        int outline = !act ? 0x25FFFFFF : hov ? 0x70FFFFFF : 0x40FFFFFF;
+                        g.fill(getX(), getY(), getX() + getWidth(), getY() + getHeight(), bg);
+                        g.renderOutline(getX(), getY(), getWidth(), getHeight(), outline);
+                        Component cap = Component.literal(on ? "Enabled" : "Disabled");
+                        int tc = on ? 0xFF55FF55 : 0xFFFF5555;
+                        g.drawCenteredString(
+                                Minecraft.getInstance().font,
+                                cap,
+                                getX() + getWidth() / 2,
+                                getY() + (getHeight() - 8) / 2,
+                                tc);
+                    }
+
+                    @Override
+                    public void updateWidgetNarration(NarrationElementOutput n) {
+                        defaultButtonNarrationText(n);
+                    }
+                };
+        btn.setTooltip(
+                Tooltip.create(Component.translatable("chat-utilities.settings.stack_repeated_messages.tooltip")));
+        return btn;
+    }
+
+    private AbstractWidget chatHistoryLimitSlider(int x, int y, int w, int h) {
+        int min = ChatUtilitiesClientOptions.CHAT_HISTORY_LIMIT_MIN;
+        int max = ChatUtilitiesClientOptions.CHAT_HISTORY_LIMIT_MAX;
+        int cur = snapChatHistoryLimitLines(ChatUtilitiesClientOptions.getChatHistoryLimitLines());
+        double initial = (cur - min) / (double) (max - min);
+        AbstractSliderButton slider =
+                new AbstractSliderButton(x, y, w, h, Component.empty(), initial) {
+                    {
+                        updateMessage();
+                    }
+
+                    @Override
+                    protected void updateMessage() {
+                        setMessage(Component.literal(linesFromSlider() + " lines"));
+                    }
+
+                    private int linesFromSlider() {
+                        return Mth.clamp(
+                                (int) Math.round(Mth.lerp(value, min, max)), min, max);
+                    }
+
+                    @Override
+                    protected void applyValue() {
+                        int snapped = snapChatHistoryLimitLines(linesFromSlider());
+                        value = (snapped - min) / (double) (max - min);
+                        ChatUtilitiesClientOptions.setChatHistoryLimitLines(snapped);
+                        updateMessage();
+                    }
+                };
+        slider.setTooltip(
+                Tooltip.create(Component.translatable("chat-utilities.settings.chat_history_limit.tooltip")));
+        slider.active = ChatUtilitiesClientOptions.isLongerChatHistory();
+        return slider;
     }
 
     private AbstractWidget flatButtonClickToCopy(int x, int y, int w, int h) {
@@ -1650,7 +1972,8 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
     }
 
     private int settingsOtherTitleY() {
-        return settingsFormBodyY() + 106 + SETTINGS_SECTION_GAP;
+        // Three control rows (open key + two copy binds), 22px widgets, 28px row step.
+        return settingsFormBodyY() + 78 + SETTINGS_SECTION_GAP;
     }
 
     private int settingsOtherFormY() {
@@ -1673,12 +1996,70 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         return settingsSymbolSelectorRowY() + 28;
     }
 
+    private int settingsSmoothChatRowY() {
+        return settingsShadowRowY() + 28;
+    }
+
+    private int settingsSmoothChatDelayRowY() {
+        return settingsSmoothChatRowY() + 28;
+    }
+
+    private int settingsSmoothChatBarOpenRowY() {
+        return settingsSmoothChatDelayRowY() + 28;
+    }
+
+    private int settingsLongerChatHistoryRowY() {
+        return settingsSmoothChatBarOpenRowY() + 28;
+    }
+
+    private int settingsChatHistoryLimitRowY() {
+        return settingsLongerChatHistoryRowY() + 28;
+    }
+
+    private int settingsStackRepeatedMessagesRowY() {
+        return settingsChatHistoryLimitRowY() + 28;
+    }
+
     private int settingsProfilesTitleY() {
-        return settingsShadowRowY() + 28 + SETTINGS_SECTION_GAP;
+        return settingsStackRepeatedMessagesRowY() + 28 + SETTINGS_SECTION_GAP;
     }
 
     private int settingsProfilesFormY() {
         return settingsProfilesTitleY() + settingsSectionHeaderH() + 6;
+    }
+
+    private int settingsScrollViewportTop() {
+        return bodyY();
+    }
+
+    private int settingsScrollViewportBottom() {
+        return footerY() - 6;
+    }
+
+    /** Bottom Y (exclusive) of the scrollable settings block in logical (unscrolled) coordinates. */
+    private int settingsScrollableBottomLogical() {
+        return settingsProfilesFormY() + 20;
+    }
+
+    private int settingsScrollableContentHeight() {
+        return settingsScrollableBottomLogical() - settingsScrollViewportTop();
+    }
+
+    private int settingsScrollViewportHeight() {
+        return Math.max(0, settingsScrollViewportBottom() - settingsScrollViewportTop());
+    }
+
+    private int settingsMaxContentScroll() {
+        return Math.max(0, settingsScrollableContentHeight() - settingsScrollViewportHeight());
+    }
+
+    private int settingsScrolledY(int logicalY) {
+        return logicalY - settingsContentScroll;
+    }
+
+    private void addSettingsScrollClipWidget(AbstractWidget w) {
+        addRenderableWidget(w);
+        settingsScrollClipRenderables.add(w);
     }
 
     private void renderSettingsPanelExtras(GuiGraphics g) {
@@ -1687,61 +2068,116 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         }
         int fx = contentLeft();
         int fr = contentRight();
-        drawSettingsSectionHeader(g, fx, fr, bodyY(), "Controls");
-        int yRow = settingsFormBodyY();
-        g.drawString(this.font, "Open Chat Utilities", fx, yRow + 7, ChatUtilitiesScreenLayout.TEXT_LABEL, false);
-        int yCopyPlain = settingsFormBodyY() + 28;
-        g.drawString(
-                this.font,
-                Component.translatable("chat-utilities.settings.copy_plain_bind"),
-                fx,
-                yCopyPlain + 7,
-                ChatUtilitiesScreenLayout.TEXT_LABEL,
-                false);
-        int yCopyFmt = settingsFormBodyY() + 56;
-        g.drawString(
-                this.font,
-                Component.translatable("chat-utilities.settings.copy_formatted_bind"),
-                fx,
-                yCopyFmt + 7,
-                ChatUtilitiesScreenLayout.TEXT_LABEL,
-                false);
-        int yOtherTitle = settingsOtherTitleY();
-        drawSettingsSectionHeader(g, fx, fr, yOtherTitle, "Settings");
-        int yClickCopy = settingsClickToCopyRowY();
-        g.drawString(
-                this.font,
-                Component.translatable("chat-utilities.settings.click_to_copy"),
-                fx,
-                yClickCopy + 7,
-                ChatUtilitiesScreenLayout.TEXT_LABEL,
-                false);
-        int yFmtStyle = settingsCopyFormattedStyleRowY();
-        g.drawString(
-                this.font,
-                Component.translatable("chat-utilities.settings.copy_formatted_style"),
-                fx,
-                yFmtStyle + 7,
-                ChatUtilitiesScreenLayout.TEXT_LABEL,
-                false);
-        int ySym = settingsSymbolSelectorRowY();
-        g.drawString(
-                this.font,
-                Component.translatable("chat-utilities.settings.chat_symbol_selector"),
-                fx,
-                ySym + 7,
-                ChatUtilitiesScreenLayout.TEXT_LABEL,
-                false);
-        int yShadow = settingsShadowRowY();
-        g.drawString(
-                this.font,
-                Component.translatable("chat-utilities.settings.chat_text_shadow"),
-                fx,
-                yShadow + 7,
-                ChatUtilitiesScreenLayout.TEXT_LABEL,
-                false);
-        int yProfTitle = settingsProfilesTitleY();
-        drawSettingsSectionHeader(g, fx, fr, yProfTitle, "Profiles");
+        int vt = settingsScrollViewportTop();
+        int vb = settingsScrollViewportBottom();
+        g.enableScissor(fx, vt, fr, vb);
+        try {
+            drawSettingsSectionHeader(g, fx, fr, settingsScrolledY(bodyY()), "Controls");
+            int yRow = settingsScrolledY(settingsFormBodyY());
+            g.drawString(this.font, "Open Chat Utilities", fx, yRow + 7, ChatUtilitiesScreenLayout.TEXT_LABEL, false);
+            int yCopyPlain = settingsScrolledY(settingsFormBodyY() + 28);
+            g.drawString(
+                    this.font,
+                    Component.translatable("chat-utilities.settings.copy_plain_bind"),
+                    fx,
+                    yCopyPlain + 7,
+                    ChatUtilitiesScreenLayout.TEXT_LABEL,
+                    false);
+            int yCopyFmt = settingsScrolledY(settingsFormBodyY() + 56);
+            g.drawString(
+                    this.font,
+                    Component.translatable("chat-utilities.settings.copy_formatted_bind"),
+                    fx,
+                    yCopyFmt + 7,
+                    ChatUtilitiesScreenLayout.TEXT_LABEL,
+                    false);
+            int yOtherTitle = settingsScrolledY(settingsOtherTitleY());
+            drawSettingsSectionHeader(g, fx, fr, yOtherTitle, "Settings");
+            int yClickCopy = settingsScrolledY(settingsClickToCopyRowY());
+            g.drawString(
+                    this.font,
+                    Component.translatable("chat-utilities.settings.click_to_copy"),
+                    fx,
+                    yClickCopy + 7,
+                    ChatUtilitiesScreenLayout.TEXT_LABEL,
+                    false);
+            int yFmtStyle = settingsScrolledY(settingsCopyFormattedStyleRowY());
+            g.drawString(
+                    this.font,
+                    Component.translatable("chat-utilities.settings.copy_formatted_style"),
+                    fx,
+                    yFmtStyle + 7,
+                    ChatUtilitiesScreenLayout.TEXT_LABEL,
+                    false);
+            int ySym = settingsScrolledY(settingsSymbolSelectorRowY());
+            g.drawString(
+                    this.font,
+                    Component.translatable("chat-utilities.settings.chat_symbol_selector"),
+                    fx,
+                    ySym + 7,
+                    ChatUtilitiesScreenLayout.TEXT_LABEL,
+                    false);
+            int yShadow = settingsScrolledY(settingsShadowRowY());
+            g.drawString(
+                    this.font,
+                    Component.translatable("chat-utilities.settings.chat_text_shadow"),
+                    fx,
+                    yShadow + 7,
+                    ChatUtilitiesScreenLayout.TEXT_LABEL,
+                    false);
+            int ySmooth = settingsScrolledY(settingsSmoothChatRowY());
+            g.drawString(
+                    this.font,
+                    Component.translatable("chat-utilities.settings.smooth_chat"),
+                    fx,
+                    ySmooth + 7,
+                    ChatUtilitiesScreenLayout.TEXT_LABEL,
+                    false);
+            int ySmoothDelay = settingsScrolledY(settingsSmoothChatDelayRowY());
+            g.drawString(
+                    this.font,
+                    Component.translatable("chat-utilities.settings.smooth_chat_delay"),
+                    fx,
+                    ySmoothDelay + 7,
+                    ChatUtilitiesScreenLayout.TEXT_LABEL,
+                    false);
+            int ySmoothBar = settingsScrolledY(settingsSmoothChatBarOpenRowY());
+            g.drawString(
+                    this.font,
+                    Component.translatable("chat-utilities.settings.smooth_chat_bar_open"),
+                    fx,
+                    ySmoothBar + 7,
+                    ChatUtilitiesScreenLayout.TEXT_LABEL,
+                    false);
+            int yLongerHist = settingsScrolledY(settingsLongerChatHistoryRowY());
+            g.drawString(
+                    this.font,
+                    Component.translatable("chat-utilities.settings.longer_chat_history"),
+                    fx,
+                    yLongerHist + 7,
+                    ChatUtilitiesScreenLayout.TEXT_LABEL,
+                    false);
+            int yHistLimit = settingsScrolledY(settingsChatHistoryLimitRowY());
+            g.drawString(
+                    this.font,
+                    Component.translatable("chat-utilities.settings.chat_history_limit"),
+                    fx,
+                    yHistLimit + 7,
+                    ChatUtilitiesScreenLayout.TEXT_LABEL,
+                    false);
+            int yStackRep = settingsScrolledY(settingsStackRepeatedMessagesRowY());
+            g.drawString(
+                    this.font,
+                    Component.translatable("chat-utilities.settings.stack_repeated_messages"),
+                    fx,
+                    yStackRep + 7,
+                    ChatUtilitiesScreenLayout.TEXT_LABEL,
+                    false);
+            int yProfTitle = settingsScrolledY(settingsProfilesTitleY());
+            drawSettingsSectionHeader(g, fx, fr, yProfTitle, "Profiles");
+        } finally {
+            g.disableScissor();
+        }
     }
 
     private void drawSettingsSectionHeader(GuiGraphics g, int fx, int fr, int y, String title) {
@@ -1854,15 +2290,6 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         return ChatUtilitiesManager.get().getProfile(selectedProfileId);
     }
 
-    /** Profile tint for sidebar (footer Settings row); default blue if none. */
-    private int selectedProfileAccentRgb() {
-        ServerProfile p = profile();
-        if (p == null || p.getServers().isEmpty() || this.minecraft == null) {
-            return 0x3A9FE0;
-        }
-        return ProfileFaviconCache.getProfileAccentRgb(this.minecraft, p.getServers().getFirst());
-    }
-
     /** Blend a dark base ARGB with a profile accent RGB (0xRRGGBB). */
     private static int mixProfileAccentArgb(int baseArgb, int accentRgb, float t) {
         int br = (baseArgb >> 16) & 0xFF;
@@ -1909,6 +2336,7 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         winScroll = 0;
         ignScroll = 0;
         ruleScroll = 0;
+        settingsContentScroll = 0;
         expandedWindowIds.clear();
         windowPatScroll.clear();
     }
@@ -1957,7 +2385,25 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         if (!(activePanel == Panel.CHAT_SOUNDS && soundAnchor != null)) {
             sugFiltered = List.of();
         }
-        super.render(graphics, mouseX, mouseY, partialTick); // renderBackground() + widgets
+        if (activePanel == Panel.SETTINGS && !settingsScrollClipRenderables.isEmpty()) {
+            int cl = contentLeft();
+            int cr = contentRight();
+            int vt = settingsScrollViewportTop();
+            int vb = settingsScrollViewportBottom();
+            graphics.enableScissor(cl, vt, cr, vb);
+            try {
+                for (Renderable renderable : settingsScrollClipRenderables) {
+                    renderable.render(graphics, mouseX, mouseY, partialTick);
+                }
+            } finally {
+                graphics.disableScissor();
+            }
+            for (Renderable renderable : settingsNonClipRenderables) {
+                renderable.render(graphics, mouseX, mouseY, partialTick);
+            }
+        } else {
+            super.render(graphics, mouseX, mouseY, partialTick);
+        }
         renderSidebar(graphics, mouseX, mouseY);
         renderContentHeader(graphics);
         renderSettingsPanelExtras(graphics);
@@ -2089,19 +2535,18 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         int row1y = row0y + SIDEBAR_FOOTER_ROW_H;
         g.fill(sl, row1y, sr, sb, 0xFF040408);
         boolean settingsActive = activePanel == Panel.SETTINGS;
-        int footAccentRgb = selectedProfileAccentRgb();
         boolean hovSet = mouseX >= sl && mouseX < sr && mouseY >= row1y && mouseY < sb;
         if (settingsActive) {
-            int subActiveBg = mixProfileAccentArgb(C_ACTIVE_BG, footAccentRgb, 0.38f);
+            int subActiveBg = mixProfileAccentArgb(C_ACTIVE_BG, SIDEBAR_GLOBAL_ACCENT_RGB, 0.38f);
             g.fill(sl, row1y, sr, sb, subActiveBg);
-            g.fill(sl, row1y, sl + 2, sb, sidebarTabAccentBar(footAccentRgb));
+            g.fill(sl, row1y, sl + 2, sb, sidebarTabAccentBar(SIDEBAR_GLOBAL_ACCENT_RGB));
         } else if (hovSet) {
             g.fill(sl, row1y, sr, sb, C_HOVER);
         }
         int settingsTextColor =
                 settingsActive
-                        ? sidebarTabLabelArgb(footAccentRgb, true)
-                        : sidebarTabLabelArgb(footAccentRgb, false);
+                        ? sidebarTabLabelArgb(SIDEBAR_GLOBAL_ACCENT_RGB, true)
+                        : sidebarTabLabelArgb(SIDEBAR_GLOBAL_ACCENT_RGB, false);
         g.drawString(this.font, "\u2699 Settings",
                 sl + SUB_INDENT, row1y + (SIDEBAR_FOOTER_ROW_H - 8) / 2, settingsTextColor, false);
 
@@ -2697,6 +3142,23 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                     }
                 }
             }
+        }
+        if (activePanel == Panel.SETTINGS
+                && mouseX >= contentLeft()
+                && mouseX <= contentRight()
+                && mouseY >= settingsScrollViewportTop()
+                && mouseY < settingsScrollViewportBottom()) {
+            int maxSet = settingsMaxContentScroll();
+            if (maxSet > 0) {
+                int step = verticalAmount > 0 ? -SETTINGS_SCROLL_STEP : SETTINGS_SCROLL_STEP;
+                int next = Mth.clamp(settingsContentScroll + step, 0, maxSet);
+                if (next != settingsContentScroll) {
+                    settingsContentScroll = next;
+                    init();
+                    return true;
+                }
+            }
+            return true;
         }
         if (mouseX >= sidebarLeft() && mouseX < sidebarRight()) {
             List<ServerProfile> profiles = sortedProfiles();

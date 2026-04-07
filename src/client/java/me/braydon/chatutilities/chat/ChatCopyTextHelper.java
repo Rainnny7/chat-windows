@@ -35,9 +35,24 @@ public final class ChatCopyTextHelper {
 
     /**
      * Legacy § formatting: emits codes only when style changes (not before every sibling), uses
-     * exact palette colors when possible, otherwise {@code §x§r§r§g§g§b§b} RGB (1.16+).
+     * exact palette colors when possible, otherwise {@code §x§r§r§g§g§b§b} RGB (1.16+). Does not
+     * insert {@code §r} before a new color: in Java Edition a color code resets bold, italic, and
+     * other decorations, so a leading reset would be redundant (and would become spurious
+     * {@code <reset>} in MiniMessage copy mode).
      */
     public static String toLegacySectionString(Component message) {
+        return toLegacyString(message, ChatFormatting.PREFIX_CODE);
+    }
+
+    /**
+     * Same as {@link #toLegacySectionString(Component)} but uses {@code &} as the format prefix
+     * (common in server.properties, Bukkit, etc.) instead of {@code §}.
+     */
+    public static String toLegacyAmpersandString(Component message) {
+        return toLegacyString(message, '&');
+    }
+
+    private static String toLegacyString(Component message, char prefix) {
         StringBuilder out = new StringBuilder();
         Style[] lastHolder = new Style[] {null};
         message.visit(
@@ -47,12 +62,13 @@ public final class ChatCopyTextHelper {
                     }
                     Style last = lastHolder[0];
                     if (last == null) {
-                        appendLegacyStyleCodes(out, style);
+                        appendLegacyStyleCodes(out, style, prefix);
                         lastHolder[0] = style;
                     } else if (!stylesEqual(last, style)) {
-                        char p = ChatFormatting.PREFIX_CODE;
-                        out.append(p).append(ChatFormatting.RESET.getChar());
-                        appendLegacyStyleCodes(out, style);
+                        if (!legacyStyleCodesLeadWithColor(style)) {
+                            out.append(prefix).append(ChatFormatting.RESET.getChar());
+                        }
+                        appendLegacyStyleCodes(out, style, prefix);
                         lastHolder[0] = style;
                     }
                     out.append(segment);
@@ -179,41 +195,44 @@ public final class ChatCopyTextHelper {
         }
     }
 
-    private static void appendLegacyStyleCodes(StringBuilder out, Style style) {
-        char p = ChatFormatting.PREFIX_CODE;
+    /** True when {@link #appendLegacyStyleCodes} will write a color first (named or {@code §x} RGB). */
+    private static boolean legacyStyleCodesLeadWithColor(Style style) {
+        return style.getColor() != null;
+    }
+
+    private static void appendLegacyStyleCodes(StringBuilder out, Style style, char prefix) {
         TextColor tc = style.getColor();
         if (tc != null) {
             ChatFormatting named = exactFormattingColor(tc);
             if (named != null) {
-                out.append(p).append(named.getChar());
+                out.append(prefix).append(named.getChar());
             } else {
-                appendRgbLegacy(out, tc.getValue() & 0xFFFFFF);
+                appendRgbLegacy(out, tc.getValue() & 0xFFFFFF, prefix);
             }
         }
         if (style.isBold()) {
-            out.append(p).append(ChatFormatting.BOLD.getChar());
+            out.append(prefix).append(ChatFormatting.BOLD.getChar());
         }
         if (style.isItalic()) {
-            out.append(p).append(ChatFormatting.ITALIC.getChar());
+            out.append(prefix).append(ChatFormatting.ITALIC.getChar());
         }
         if (style.isUnderlined()) {
-            out.append(p).append(ChatFormatting.UNDERLINE.getChar());
+            out.append(prefix).append(ChatFormatting.UNDERLINE.getChar());
         }
         if (style.isStrikethrough()) {
-            out.append(p).append(ChatFormatting.STRIKETHROUGH.getChar());
+            out.append(prefix).append(ChatFormatting.STRIKETHROUGH.getChar());
         }
         if (style.isObfuscated()) {
-            out.append(p).append(ChatFormatting.OBFUSCATED.getChar());
+            out.append(prefix).append(ChatFormatting.OBFUSCATED.getChar());
         }
     }
 
-    /** {@code §x§r§r§g§g§b§b} */
-    private static void appendRgbLegacy(StringBuilder out, int rgb) {
-        char p = ChatFormatting.PREFIX_CODE;
-        out.append(p).append('x');
+    /** {@code prefix + x + six (prefix + hex digit)} e.g. {@code §x§r§r§g§g§b§b} or {@code &x&r&r&g&g&b&b}. */
+    private static void appendRgbLegacy(StringBuilder out, int rgb, char prefix) {
+        out.append(prefix).append('x');
         String hex = String.format("%06x", rgb);
         for (int i = 0; i < hex.length(); i++) {
-            out.append(p).append(hex.charAt(i));
+            out.append(prefix).append(hex.charAt(i));
         }
     }
 

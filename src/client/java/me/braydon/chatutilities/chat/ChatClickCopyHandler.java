@@ -17,6 +17,9 @@ import java.util.Optional;
 public final class ChatClickCopyHandler {
     private ChatClickCopyHandler() {}
 
+    private static final long COPY_CLICK_COOLDOWN_MS = 2500L;
+    private static long lastCopyWallTimeMs = 0L;
+
     public static boolean tryHandleCopyClick(
             Minecraft mc, ChatScreen ignoredScreen, double mouseX, double mouseY, int button) {
         if (!ChatUtilitiesClientOptions.isClickToCopyEnabled()) {
@@ -67,6 +70,11 @@ public final class ChatClickCopyHandler {
             return false;
         }
 
+        long now = System.currentTimeMillis();
+        if (now - lastCopyWallTimeMs < COPY_CLICK_COOLDOWN_MS) {
+            return false;
+        }
+
         Component comp = message.get();
         String clip;
         if (wantFormatted) {
@@ -80,6 +88,7 @@ public final class ChatClickCopyHandler {
             clip = ChatCopyTextHelper.plainForClipboard(comp);
         }
         mc.keyboardHandler.setClipboard(clip);
+        lastCopyWallTimeMs = now;
         showCopyToast(mc);
         return true;
     }
@@ -111,7 +120,7 @@ public final class ChatClickCopyHandler {
                 continue;
             }
             int tx = geo.x + ChatWindowGeometry.padding();
-            int ty = geo.y + ChatWindowGeometry.padding() + ChatWindowGeometry.CONTENT_TOP_INSET + geo.contentStartYOffset;
+            int ty = geo.y + geo.contentRowOffsetY;
             int textRight = geo.x + geo.boxW - ChatWindowGeometry.padding();
             int textBottom = geo.y + geo.boxH - ChatWindowGeometry.padding();
             if (mx < tx || mx >= textRight || my < ty || my >= textBottom) {

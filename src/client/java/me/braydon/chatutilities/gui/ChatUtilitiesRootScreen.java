@@ -1,10 +1,14 @@
 package me.braydon.chatutilities.gui;
 
+import com.google.gson.GsonBuilder;
+import com.google.gson.JsonObject;
 import com.google.gson.JsonParseException;
+import com.google.gson.JsonParser;
 import com.mojang.blaze3d.platform.InputConstants;
 import me.braydon.chatutilities.ChatUtilitiesModClient;
 import me.braydon.chatutilities.chat.*;
 import me.braydon.chatutilities.client.ChatUtilitiesClientOptions;
+import me.braydon.chatutilities.client.ModAccentAnimator;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.client.KeyMapping;
 import net.minecraft.client.Minecraft;
@@ -28,10 +32,13 @@ import net.minecraft.client.renderer.RenderPipelines;
 import net.minecraft.client.resources.sounds.SimpleSoundInstance;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.Style;
+import net.minecraft.client.multiplayer.ClientSuggestionProvider;
 import net.minecraft.resources.Identifier;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.util.FormattedCharSequence;
 import net.minecraft.util.Mth;
+import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.tree.CommandNode;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import org.lwjgl.glfw.GLFW;
@@ -53,9 +60,19 @@ import java.util.regex.PatternSyntaxException;
 public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowScreen {
 
     // ── Panel geometry ─────────────────────────────────────────────────────────
-    /** How far the panel is inset from each screen edge. */
-    private static final int MARGIN_X = 42;
-    private static final int MARGIN_Y = 28;
+    /** Minimum horizontal inset; {@link #marginX()} also scales with screen width. */
+    private static final int MARGIN_X_MIN = 56;
+    /** Minimum vertical inset; {@link #marginY()} also scales with screen height. */
+    private static final int MARGIN_Y_MIN = 40;
+    /** Corner radius for the main panel fill + frame (clamped per side in {@link RoundedPanelRenderer}). */
+    private static final int PANEL_CORNER_RADIUS = 8;
+    /** Outline thickness drawn <strong>outside</strong> the panel bounds ({@link RoundedPanelRenderer#fillRoundedRectOutsideBorder}). */
+    private static final int PANEL_BORDER_PX = 2;
+    /** Space between scrollable content and the {@link ThinScrollbar} track. */
+    private static final int SCROLLBAR_CONTENT_GAP = 10;
+    /** Default folder suggested in the native export/import file dialogs. */
+    private static final Path PROFILES_JSON_DEFAULT_DIR =
+            FabricLoader.getInstance().getConfigDir().resolve("chat-utilities");
     /** Width of the left sidebar within the panel. */
     private static final int SIDEBAR_W = 152;
     /** Height of the top “Chat Utilities” strip in the sidebar. */
@@ -94,6 +111,20 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
     private static final int SETTINGS_SCROLL_STEP = 28;
     /** Cap for Edit Profile + Chat Sounds: every input/button in those panels shares this width. */
     private static final int PROFILE_SOUNDS_FORM_MAX_W = 280;
+    /** Chat Actions panel width: capped so the section does not span the full content area; grows when the Play sound row needs room. */
+    private static final int CHAT_ACTIONS_FORM_CAP = 420;
+    private static final int COMMAND_ALIAS_PAGE = 12;
+    /** Add-row pattern field width (fixed so it does not resize when switching action type). */
+    private static final int CHAT_ACTION_ADD_PAT_W = 168;
+    /** Add-row “Action: …” toggle width (fits localized “Action: Color Highlight”). */
+    private static final int CHAT_ACTION_ACTION_BTN_W = 148;
+    private static final int CHAT_ACTION_ADD_BTN_W = 80;
+    private static final int CHAT_ACTION_SOUND_FIELD_W = 100;
+    private static final int CHAT_ACTION_TEST_BTN_W = 40;
+    /** “Pick color” for color-highlight rows (add row + list rows). */
+    private static final int CHAT_ACTION_HIGHLIGHT_PICK_W = 100;
+    /** Slightly shorter than default {@code 20} for pattern / sound fields on this panel. */
+    private static final int CHAT_ACTION_FIELD_H = 18;
 
     /** Background / outline for expanded chat window group (header + patterns). */
     private static final int C_WIN_GROUP_BG   = 0x480C1018;
@@ -118,13 +149,12 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
 
     // ── Sidebar colors ─────────────────────────────────────────────────────────
     private static final int C_PANEL_BG       = 0xF0101012;
+    /** Same family as {@link #C_PANEL_BG} RGB (0x101012), nudged lighter so the 2px ring is barely perceptible. */
+    private static final int C_PANEL_BORDER   = 0xFF19191C;
     private static final int C_SIDEBAR_BG     = 0xFF080810;
     private static final int C_SIDEBAR_SEP    = 0xFF1E1E28;
     private static final int C_PROFILE_SEL    = 0xFF12203A;
     private static final int C_ACTIVE_BG      = 0xFF0E1C36;
-    private static final int C_ACCENT         = 0xFF3A9FE0;
-    /** Fixed blue for global sidebar rows (e.g. Settings); server profile rows use favicon tint instead. */
-    private static final int SIDEBAR_GLOBAL_ACCENT_RGB = C_ACCENT & 0xFFFFFF;
     private static final int C_HOVER          = 0x18FFFFFF;
     private static final int C_PROFILE_NAME   = 0xFFEEEEEE;
     private static final int C_PROFILE_DETAIL = 0xFF888898;
@@ -133,10 +163,19 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
     private static final int C_POS_TEXT_H     = 0xFF92E592;
     /** Destructive actions (delete / remove) — reddish accent like {@link #C_NEW_PROFILE} strength. */
     private static final int C_DANGER_TEXT    = 0xFFE07878;
+
+    private int modAccentArgb() {
+        return ModAccentAnimator.currentArgb();
+    }
+
+    /** Global sidebar accent RGB (no alpha); Settings tab uses this when not using a profile favicon tint. */
+    private int modGlobalAccentRgb() {
+        return modAccentArgb() & 0xFFFFFF;
+    }
     private static final int C_DANGER_TEXT_H  = 0xFFFFA0A0;
 
     // ── Panels ─────────────────────────────────────────────────────────────────
-    public enum Panel { NONE, EDIT_PROFILE, CHAT_WINDOWS, IGNORED_CHAT, CHAT_SOUNDS, SETTINGS }
+    public enum Panel { NONE, EDIT_PROFILE, CHAT_WINDOWS, CHAT_ACTIONS, COMMAND_ALIASES, SETTINGS }
 
     // ── Sidebar hit-test entries (rebuilt each render cycle) ───────────────────
     private record SidebarEntry(int y, int h, boolean isHeader, String profileId, Panel panel) {}
@@ -152,7 +191,7 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
     private int sidebarScroll;
 
     // Per-panel scroll positions (survive resize-triggered init() calls)
-    private int serverScroll, winScroll, ignScroll, ruleScroll;
+    private int serverScroll, winScroll, actionScroll, aliasScroll;
 
     /** Vertical scroll offset (px) for Settings content between {@link #bodyY()} and the footer strip. */
     private int settingsContentScroll;
@@ -161,6 +200,16 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
     private final List<Renderable> settingsScrollClipRenderables = new ArrayList<>();
     /** On Settings: Done + Reset All — drawn outside the scroll scissor (same order as widget registration). */
     private final List<Renderable> settingsNonClipRenderables = new ArrayList<>();
+
+    /** Chat Windows widgets drawn inside the scroll viewport (clipped); excludes footer buttons + modals. */
+    private final List<Renderable> chatWindowsScrollClipRenderables = new ArrayList<>();
+    /** Chat Windows widgets drawn outside the scroll scissor (Create Window / Adjust Layout, modals, etc). */
+    private final List<Renderable> chatWindowsNonClipRenderables = new ArrayList<>();
+
+    /** Drag-to-scroll state for Chat Windows panel content area. */
+    private boolean chatWindowsContentDragScroll;
+    private int chatWindowsContentDragAnchorMy;
+    private int chatWindowsContentDragAnchorScroll;
 
     /** Hit box for the “Rainnny” author link in the sidebar header (updated each render). */
     private int sidebarAuthorLinkL, sidebarAuthorLinkR, sidebarAuthorLinkT, sidebarAuthorLinkB;
@@ -177,8 +226,20 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
 
     /** Inline-expanded windows on Chat Windows panel (any subset). */
     private final Set<String> expandedWindowIds = new LinkedHashSet<>();
-    /** Per-window pattern list scroll inside an expanded block. */
-    private final Map<String, Integer> windowPatScroll = new HashMap<>();
+
+    /**
+     * Survives closing the menu (same JVM): restored when reopening Chat Windows for the same profile.
+     */
+    private static String menuExpandedChatWindowsProfileId;
+
+    private static final Set<String> menuExpandedChatWindowsPersisted = new LinkedHashSet<>();
+
+    /** Key {@code windowId + "\\0" + tabId} → confirm deadline (ms). */
+    private final Map<String, Long> removeTabConfirmDeadlines = new HashMap<>();
+    /** Per (window id, tab id) pattern list scroll inside an expanded block. */
+    private final Map<String, Integer> windowTabPatScroll = new HashMap<>();
+    /** Selected tab for menu editing per window id (HUD selection is on {@link ChatWindow}). */
+    private final Map<String, String> menuWindowTabId = new HashMap<>();
 
     private boolean createWinDialogOpen;
     private EditBox dlgWinIdField, dlgWinPatField;
@@ -191,9 +252,57 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
     private AbstractWidget dlgRenameOkButton, dlgRenameCancelButton;
     private int renameDlgX, renameDlgY, renameDlgW, renameDlgH;
 
+    private boolean newTabDialogOpen;
+    private String newTabDlgWindowId;
+    private EditBox dlgNewTabNameField;
+    private AbstractWidget dlgNewTabOkButton, dlgNewTabCancelButton;
+    private int newTabDlgX, newTabDlgY, newTabDlgW, newTabDlgH;
+
+    private boolean renameTabDialogOpen;
+    private String renameTabDlgWindowId;
+    private String renameTabDlgTabId;
+    private EditBox dlgRenameTabNameField;
+    private AbstractWidget dlgRenameTabOkButton, dlgRenameTabCancelButton;
+    private int renameTabDlgX, renameTabDlgY, renameTabDlgW, renameTabDlgH;
+
+    private boolean createProfileDialogOpen;
+    private EditBox dlgCreateProfileNameField;
+    private AbstractWidget dlgCreateProfileOkButton, dlgCreateProfileCancelButton;
+    private int createProfileDlgX, createProfileDlgY, createProfileDlgW, createProfileDlgH;
+
+    private boolean importExportChoiceDialogOpen;
+    private boolean importExportChoiceIsImport;
+    private AbstractWidget importExportProfilesOnlyBtn;
+    private AbstractWidget importExportProfilesAndSettingsBtn;
+    private AbstractWidget importExportCancelBtn;
+    private int importExportDlgX, importExportDlgY, importExportDlgW, importExportDlgH;
+
+    /** In-menu color editor (accent or timestamp RGB); does not replace this screen. */
+    private ModPrimaryColorPickerOverlay modColorPickerOverlay;
+
+    /** Domain whitelist for chat image hover previews. */
+    private ImagePreviewWhitelistOverlay imageWhitelistOverlay;
+
+    private EditBox settingsTimestampFormatField;
+    /** Width reserved left of the timestamp format {@link EditBox} for the live preview (see {@link #buildSettingsWidgets}). */
+    private int settingsTimestampPreviewSlotW = 72;
+
     /** Background rects for expanded window blocks; filled in {@link #buildChatWindowsWidgets}. */
     private record WinChromeRect(int l, int t, int r, int b) {}
     private final List<WinChromeRect> winChromeRects = new ArrayList<>();
+
+    /** Tab chip rects inside expanded window blocks; filled in {@link #buildChatWindowsWidgets}. */
+    private record MenuTabRect(String windowId, String tabId, int tabIndex, int l, int t, int r, int b) {}
+
+    private final List<MenuTabRect> menuTabRects = new ArrayList<>();
+
+    private @org.jspecify.annotations.Nullable String menuDragWindowId;
+    private @org.jspecify.annotations.Nullable String menuDragTabId;
+    private int menuDragFromIndex = -1;
+    private int menuDragHoverIndex = -1;
+    private double menuDragPressX;
+    private double menuDragPressY;
+    private boolean menuDragDidMove;
 
     /** Chat Windows list scrollbar (see {@link ThinScrollbar}); metrics from {@link #buildChatWindowsWidgets}. */
     private boolean chatWindowsShowScrollbar;
@@ -201,10 +310,43 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
     private int chatWindowsTotalListHeight;
     private int chatWindowsListViewportHeight;
 
+    private enum ThinScrollDrag {
+        NONE,
+        SETTINGS_THUMB,
+        CHAT_WINDOWS_THUMB
+    }
+
+    private ThinScrollDrag thinScrollDrag = ThinScrollDrag.NONE;
+    private double thinScrollDragAnchorScroll;
+    private int thinScrollDragAnchorMy;
+    private int thinScrollDragMaxTravel;
+    private double thinScrollDragMaxScroll;
+
     // Widget references rebuilt each init()
     private EditBox nameField, newServerField;
-    private EditBox newIgnoreField;
     private EditBox patternField, soundField;
+    private EditBox commandAliasAddFromField, commandAliasAddToField;
+    private String commandAliasNewFromDraft = "";
+    private String commandAliasNewToDraft = "";
+    private ChatActionEffect.Type chatActionNewType = ChatActionEffect.Type.PLAY_SOUND;
+    /** Preserved across effect-type cycles and {@link #init()} rebuilds (add row pattern field). */
+    private String chatActionNewPatternDraft = "";
+    private int chatActionNewHighlightRgb = ChatActionEffect.DEFAULT_HIGHLIGHT_RGB;
+    private boolean chatActionNewHlBold;
+    private boolean chatActionNewHlItalic;
+    private boolean chatActionNewHlUnderlined;
+    private boolean chatActionNewHlStrikethrough;
+    private boolean chatActionNewHlObfuscated;
+    private String chatHighlightPickProfileId;
+    private int chatHighlightPickGroupIndex = -1;
+    private int chatHighlightPickEffectIndex = -1;
+
+    // Chat Actions: effect type dropdown (replaces cycle button)
+    private boolean chatActionTypeDropdownOpen;
+    private String chatActionTypePickProfileId;
+    private int chatActionTypePickGroupIndex = -1;
+    private int chatActionTypePickEffectIndex = -1;
+    private int chatActionTypeDropX, chatActionTypeDropY, chatActionTypeDropW, chatActionTypeDropH;
 
     // Sound autocomplete popup (scrollable when many matches)
     private static final int SUGGEST_VISIBLE_ROWS = 8;
@@ -215,17 +357,32 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
     private String sugLastQuery;
     private int sugLeft, sugTop, sugWidth, sugVisibleRows;
 
-    private record PendingPatternEdit(EditBox box, ServerProfile profile, String windowId, int userPosition) {}
+    // Command autocomplete popup (Command Aliases panel)
+    private List<String> cmdSugFiltered = List.of();
+    private int cmdSugScroll;
+    private String cmdSugLastQuery;
+    private int cmdSugLeft, cmdSugTop, cmdSugWidth, cmdSugVisibleRows;
+
+    private record PendingPatternEdit(
+            EditBox box, ServerProfile profile, String windowId, String tabId, int userPosition) {}
     private final List<PendingPatternEdit> pendingPatternEdits = new ArrayList<>();
-    private record PendingNewPattern(EditBox box, ServerProfile profile, String windowId) {}
+    private record PendingNewPattern(EditBox box, ServerProfile profile, String windowId, String tabId) {}
     private final List<PendingNewPattern> pendingNewPatterns = new ArrayList<>();
-    private record PendingIgnoreEdit(EditBox box, ServerProfile profile, int listIndex) {}
-    private final List<PendingIgnoreEdit> pendingIgnoreEdits = new ArrayList<>();
-    private record PendingMessageSoundEdit(EditBox patternBox, EditBox soundBox, ServerProfile profile, int listIndex) {}
-    private final List<PendingMessageSoundEdit> pendingMessageSoundEdits = new ArrayList<>();
+    private record PendingChatGroupPattern(EditBox patternBox, ServerProfile profile, int groupIndex) {}
+    /** Boxes may be null depending on effect type (sound vs target text). */
+    private record PendingChatEffectEdit(EditBox soundBox, EditBox targetBox, ServerProfile profile, int groupIndex, int effectIndex) {}
+    private final List<PendingChatGroupPattern> pendingChatGroupPatterns = new ArrayList<>();
+    private final List<PendingChatEffectEdit> pendingChatEffectEdits = new ArrayList<>();
+    /** Session-only collapse state for Chat Actions groups (index-based; rebuilt on init). */
+    private final java.util.Set<Integer> collapsedChatActionGroups = new java.util.HashSet<>();
+    private record PendingCommandAliasEdit(EditBox fromBox, EditBox toBox, ServerProfile profile, int index) {}
+    private final List<PendingCommandAliasEdit> pendingCommandAliasEdits = new ArrayList<>();
 
     /** Waiting for the next key / mouse button to assign {@link ChatUtilitiesModClient#OPEN_MENU_KEY}. */
     private boolean rebindingOpenMenuKey;
+    private boolean rebindingChatPeekKey;
+    /** Waiting for the next mouse button/modifiers to assign fullscreen image preview click binding. */
+    private boolean rebindingFullscreenImageClick;
     private boolean rebindingCopyPlain;
     private boolean rebindingCopyFormatted;
 
@@ -242,6 +399,12 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
             this.expandedProfileIds.add(savedProfile);
             this.selectedProfileId = savedProfile;
             this.activePanel = parseSavedPanel(savedPanelStr);
+            this.serverScroll = ChatUtilitiesClientOptions.getLastMenuServerScroll();
+            this.winScroll = ChatUtilitiesClientOptions.getLastMenuWinScroll();
+            this.actionScroll = ChatUtilitiesClientOptions.getLastMenuActionScroll();
+            this.aliasScroll = ChatUtilitiesClientOptions.getLastMenuAliasScroll();
+            this.settingsContentScroll = ChatUtilitiesClientOptions.getLastMenuSettingsContentScroll();
+            this.chatWindowsListScrollPixels = ChatUtilitiesClientOptions.getLastMenuChatWindowsListScrollPixels();
         } else {
             ServerProfile active = mgr.getActiveProfile();
             if (active != null) {
@@ -270,6 +433,11 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
 
     @Override public ChatUtilitiesRootScreen getChatRoot() { return this; }
 
+    /** Parent screen when this menu was opened (e.g. chat). */
+    public Screen getMenuParent() {
+        return parent;
+    }
+
     @Override
     public Screen recreateForProfile() {
         if (selectedProfileId == null) {
@@ -282,10 +450,34 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
 
     // ── Panel / content coordinates ────────────────────────────────────────────
 
-    private int panelLeft()   { return MARGIN_X; }
-    private int panelRight()  { return this.width  - MARGIN_X; }
-    private int panelTop()    { return MARGIN_Y; }
-    private int panelBottom() { return this.height - MARGIN_Y; }
+    /** Inset from left/right edges — larger on wide screens so the panel stays a comfortable size. */
+    private int marginX() {
+        return Math.max(MARGIN_X_MIN, this.width * 11 / 100);
+    }
+
+    private int marginY() {
+        return Math.max(MARGIN_Y_MIN, this.height * 9 / 100);
+    }
+
+    private int panelLeft() {
+        return marginX();
+    }
+
+    private int panelRight() {
+        return this.width - marginX();
+    }
+
+    private int panelTop() {
+        return marginY();
+    }
+
+    private int panelBottom() {
+        return this.height - marginY();
+    }
+
+    private int scrollbarReserve(boolean scrollbarVisible) {
+        return scrollbarVisible ? ThinScrollbar.W + SCROLLBAR_CONTENT_GAP : 0;
+    }
     private int panelW()      { return panelRight()  - panelLeft(); }
     private int panelH()      { return panelBottom() - panelTop(); }
 
@@ -293,6 +485,43 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
     private int sidebarRight()  { return panelLeft() + SIDEBAR_W; }
     private int sidebarTop()    { return panelTop(); }
     private int sidebarBottom() { return panelBottom(); }
+
+    /** Rounded panel interior used for sidebar clipping (full logical panel; border is outside these bounds). */
+    private int panelInnerX() {
+        return panelLeft();
+    }
+
+    private int panelInnerY() {
+        return panelTop();
+    }
+
+    private int panelInnerW() {
+        return panelW();
+    }
+
+    private int panelInnerH() {
+        return panelH();
+    }
+
+    private int panelInnerCornerRadius() {
+        return Math.min(PANEL_CORNER_RADIUS, Math.min(panelW(), panelH()) / 2);
+    }
+
+    /** Sidebar (or separator) pixels clipped to the panel’s rounded fill (same bounds as the solid panel background). */
+    private void fillSidebarClipped(GuiGraphics g, int ax, int ay, int aw, int ah, int color) {
+        RoundedPanelRenderer.fillRectIntersectRounded(
+                g,
+                panelInnerX(),
+                panelInnerY(),
+                panelInnerW(),
+                panelInnerH(),
+                panelInnerCornerRadius(),
+                ax,
+                ay,
+                aw,
+                ah,
+                color);
+    }
 
     private int contentLeft()  { return sidebarRight() + CONTENT_PAD_X; }
     private int contentRight() { return panelRight()   - CONTENT_PAD_X; }
@@ -343,6 +572,22 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         return s + ell;
     }
 
+    private static String stripSlashCommand(String raw) {
+        if (raw == null) {
+            return "";
+        }
+        String s = raw.strip();
+        while (s.startsWith("/")) {
+            s = s.substring(1);
+        }
+        return s.strip();
+    }
+
+    private static String displaySlashCommand(String raw) {
+        String s = stripSlashCommand(raw);
+        return s.isEmpty() ? "" : "/" + s;
+    }
+
     private static List<ServerProfile> sortedProfilesList(ChatUtilitiesManager mgr) {
         List<ServerProfile> all = new ArrayList<>(mgr.getProfiles());
         ServerProfile active = mgr.getActiveProfile();
@@ -355,6 +600,9 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
     private static Panel parseSavedPanel(String name) {
         if (name == null || name.isEmpty()) {
             return Panel.CHAT_WINDOWS;
+        }
+        if ("IGNORED_CHAT".equals(name) || "CHAT_SOUNDS".equals(name)) {
+            return Panel.CHAT_ACTIONS;
         }
         try {
             return Panel.valueOf(name);
@@ -389,9 +637,17 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
     public void renderBackground(GuiGraphics g, int mouseX, int mouseY, float partialTick) {
         // Subtle global dim so the game world at the margins is not distracting
         g.fill(0, 0, this.width, this.height, 0x55000000);
-        // Opaque panel background
-        g.fill(panelLeft(), panelTop(), panelRight(), panelBottom(), C_PANEL_BG);
-        if (activePanel == Panel.CHAT_WINDOWS && !winChromeRects.isEmpty()) {
+        int pl = panelLeft();
+        int pt = panelTop();
+        int pr = panelRight();
+        int pb = panelBottom();
+        int pw = pr - pl;
+        int ph = pb - pt;
+        int panelBg = multiplyAlpha(C_PANEL_BG, 0.92f);
+        RoundedPanelRenderer.fillRoundedRectOutsideBorder(
+                g, pl, pt, pw, ph, PANEL_CORNER_RADIUS, panelBg, C_PANEL_BORDER, PANEL_BORDER_PX);
+        if ((activePanel == Panel.CHAT_WINDOWS || activePanel == Panel.CHAT_ACTIONS)
+                && !winChromeRects.isEmpty()) {
             for (WinChromeRect rc : winChromeRects) {
                 g.fill(rc.l(), rc.t(), rc.r(), rc.b(), C_WIN_GROUP_BG);
                 g.renderOutline(rc.l(), rc.t(), rc.r() - rc.l(), rc.b() - rc.t(), C_WIN_GROUP_EDGE);
@@ -399,21 +655,34 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         }
     }
 
+    private static int multiplyAlpha(int argb, float m) {
+        int a = (argb >>> 24) & 0xFF;
+        int rgb = argb & 0xFFFFFF;
+        int na = Mth.clamp(Math.round(a * m), 0, 255);
+        return (na << 24) | rgb;
+    }
+
     // ── init() ────────────────────────────────────────────────────────────────
 
     @Override
     protected void init() {
+        boolean keepImportExportChoiceDialogOpen = importExportChoiceDialogOpen;
+        boolean keepImportExportChoiceIsImport = importExportChoiceIsImport;
         clearWidgets();
+        modColorPickerOverlay = null;
+        clearPendingChatHighlightPickState();
+        settingsTimestampFormatField = null;
         settingsScrollClipRenderables.clear();
         settingsNonClipRenderables.clear();
-        if (activePanel != Panel.SETTINGS) {
-            settingsContentScroll = 0;
-        }
+        chatWindowsScrollClipRenderables.clear();
+        chatWindowsNonClipRenderables.clear();
+        // Preserve scroll across close/reopen; only clamp when building settings.
         sugFiltered = List.of();
         pendingPatternEdits.clear();
         pendingNewPatterns.clear();
-        pendingIgnoreEdits.clear();
-        pendingMessageSoundEdits.clear();
+        pendingChatGroupPatterns.clear();
+        pendingChatEffectEdits.clear();
+        pendingCommandAliasEdits.clear();
         dlgWinIdField = null;
         dlgWinPatField = null;
         dlgCreateButton = null;
@@ -421,12 +690,53 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         dlgRenameIdField = null;
         dlgRenameOkButton = null;
         dlgRenameCancelButton = null;
+        dlgNewTabNameField = null;
+        dlgNewTabOkButton = null;
+        dlgNewTabCancelButton = null;
+        dlgRenameTabNameField = null;
+        dlgRenameTabOkButton = null;
+        dlgRenameTabCancelButton = null;
+        dlgCreateProfileNameField = null;
+        dlgCreateProfileOkButton = null;
+        dlgCreateProfileCancelButton = null;
+        importExportProfilesOnlyBtn = null;
+        importExportProfilesAndSettingsBtn = null;
+        importExportCancelBtn = null;
+        importExportChoiceDialogOpen = keepImportExportChoiceDialogOpen;
+        importExportChoiceIsImport = keepImportExportChoiceIsImport;
+        importExportDlgX = 0;
+        importExportDlgY = 0;
+        importExportDlgW = 0;
+        importExportDlgH = 0;
+        chatActionTypeDropdownOpen = false;
+        chatActionTypePickProfileId = null;
+        chatActionTypePickGroupIndex = -1;
+        chatActionTypePickEffectIndex = -1;
+        chatActionTypeDropX = 0;
+        chatActionTypeDropY = 0;
+        chatActionTypeDropW = 0;
+        chatActionTypeDropH = 0;
+        chatWindowsContentDragScroll = false;
+        chatWindowsContentDragAnchorMy = 0;
+        chatWindowsContentDragAnchorScroll = 0;
 
         if (activePanel != Panel.CHAT_WINDOWS) {
             createWinDialogOpen = false;
             renameDialogOpen = false;
+            newTabDialogOpen = false;
+            newTabDlgWindowId = null;
+            renameTabDialogOpen = false;
+            renameTabDlgWindowId = null;
+            renameTabDlgTabId = null;
+            ServerProfile persistProf = profile();
+            if (persistProf != null
+                    && selectedProfileId != null
+                    && selectedProfileId.equals(persistProf.getId())) {
+                persistMenuExpandedChatWindows(persistProf);
+            }
             expandedWindowIds.clear();
             removeWindowConfirmDeadlines.clear();
+            removeTabConfirmDeadlines.clear();
         }
         if (activePanel != Panel.EDIT_PROFILE) {
             deleteProfileConfirmDeadlineMs = 0;
@@ -448,15 +758,23 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
             expandedWindowIds.clear();
             createWinDialogOpen = false;
             renameDialogOpen = false;
+            newTabDialogOpen = false;
+            newTabDlgWindowId = null;
+            renameTabDialogOpen = false;
+            renameTabDlgWindowId = null;
+            renameTabDlgTabId = null;
         }
 
         winChromeRects.clear();
+        thinScrollDrag = ThinScrollDrag.NONE;
 
         if (activePanel != Panel.SETTINGS) {
             rebindingOpenMenuKey = false;
+            rebindingFullscreenImageClick = false;
             rebindingCopyPlain = false;
             rebindingCopyFormatted = false;
             resetDefaultsConfirmDeadlineMs = 0;
+            imageWhitelistOverlay = null;
         }
 
         // Done button — always at bottom-right of content area
@@ -471,10 +789,19 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         switch (activePanel) {
             case EDIT_PROFILE -> buildEditProfileWidgets();
             case CHAT_WINDOWS -> buildChatWindowsWidgets();
-            case IGNORED_CHAT -> buildIgnoredChatWidgets();
-            case CHAT_SOUNDS  -> buildChatSoundsWidgets();
+            case CHAT_ACTIONS -> buildChatActionsWidgets();
+            case COMMAND_ALIASES -> buildCommandAliasesWidgets();
             case SETTINGS -> buildSettingsWidgets();
             default -> {}
+        }
+        if (createProfileDialogOpen) {
+            buildCreateProfileDialog(ChatUtilitiesManager.get());
+        }
+
+        if (activePanel == Panel.SETTINGS && imageWhitelistOverlay != null) {
+            imageWhitelistOverlay.rebuildAddField(this.font);
+            imageWhitelistOverlay.layout(this.width, this.height);
+            addRenderableWidget(imageWhitelistOverlay.getAddField());
         }
 
         // After all widgets exist, focus the modal field on the next tick (Done is added first and
@@ -483,14 +810,22 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
             if (createWinDialogOpen && dlgWinIdField != null) {
                 scheduleDialogFirstFieldFocus(dlgWinIdField);
             } else if (renameDialogOpen && dlgRenameIdField != null) {
-                scheduleDialogFirstFieldFocus(dlgRenameIdField);
+                scheduleDialogSelectAllFocus(dlgRenameIdField);
+            } else if (renameTabDialogOpen && dlgRenameTabNameField != null) {
+                scheduleDialogSelectAllFocus(dlgRenameTabNameField);
+            } else if (newTabDialogOpen && dlgNewTabNameField != null) {
+                scheduleDialogFirstFieldFocus(dlgNewTabNameField);
             }
+        }
+        if (createProfileDialogOpen && dlgCreateProfileNameField != null) {
+            scheduleDialogFirstFieldFocus(dlgCreateProfileNameField);
         }
     }
 
     @Override
     public void tick() {
         super.tick();
+        thinScrollbarDragTick();
         long now = System.currentTimeMillis();
         boolean refresh = false;
         if (deleteProfileConfirmDeadlineMs != 0 && now >= deleteProfileConfirmDeadlineMs) {
@@ -510,6 +845,11 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         if (beforeWin != removeWindowConfirmDeadlines.size() && activePanel == Panel.CHAT_WINDOWS) {
             refresh = true;
         }
+        int beforeTab = removeTabConfirmDeadlines.size();
+        removeTabConfirmDeadlines.entrySet().removeIf(e -> now >= e.getValue());
+        if (beforeTab != removeTabConfirmDeadlines.size() && activePanel == Panel.CHAT_WINDOWS) {
+            refresh = true;
+        }
         if (refresh) {
             init();
         }
@@ -526,6 +866,20 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                     String v = box.getValue();
                     int len = v.length();
                     box.setCursorPosition(len);
+                    box.setHighlightPos(len);
+                });
+    }
+
+    private void scheduleDialogSelectAllFocus(EditBox box) {
+        if (this.minecraft == null) {
+            return;
+        }
+        this.minecraft.execute(
+                () -> {
+                    this.setFocused(box);
+                    box.setFocused(true);
+                    int len = box.getValue().length();
+                    box.setCursorPosition(0);
                     box.setHighlightPos(len);
                 });
     }
@@ -613,8 +967,18 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
             @Override public void onClick(net.minecraft.client.input.MouseButtonEvent event, boolean dbl) { press.run(); }
             @Override protected void renderWidget(GuiGraphics g, int mx, int my, float pt) {
                 boolean hov = this.isHovered();
-                int bg      = hov ? 0xCC2060A8 : 0xCC1A4A8A;
-                int outline = hov ? 0xFF5BAAFF : 0xFF3A80CC;
+                int acc = modAccentArgb();
+                int r = (acc >> 16) & 0xFF;
+                int gv = (acc >> 8) & 0xFF;
+                int b = acc & 0xFF;
+                int bg = (0xCC << 24)
+                        | (Mth.clamp((int) (r * (hov ? 0.55f : 0.45f) + 26), 0, 255) << 16)
+                        | (Mth.clamp((int) (gv * (hov ? 0.55f : 0.45f) + 74), 0, 255) << 8)
+                        | Mth.clamp((int) (b * (hov ? 0.55f : 0.45f) + 138), 0, 255);
+                int lr = Mth.clamp((int) (r * (hov ? 1.15f : 1f)), 0, 255);
+                int lg = Mth.clamp((int) (gv * (hov ? 1.15f : 1f)), 0, 255);
+                int lb = Mth.clamp((int) (b * (hov ? 1.15f : 1f)), 0, 255);
+                int outline = 0xFF000000 | (lr << 16) | (lg << 8) | lb;
                 g.fill(getX(), getY(), getX() + getWidth(), getY() + getHeight(), bg);
                 g.renderOutline(getX(), getY(), getWidth(), getHeight(), outline);
                 g.drawCenteredString(Minecraft.getInstance().font, getMessage(),
@@ -759,9 +1123,41 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
     private static final int WIN_EXPANDED_TAIL_GAP = 12;
     /** Space above footer buttons (Create Window / Adjust Layout). */
     private static final int WIN_LIST_FOOTER_GAP = 26;
+    /** Tab strip row inside an expanded chat window block. */
+    private static final int WIN_TAB_STRIP_H = 22;
 
-    private int patScrollFor(String wid) {
-        return windowPatScroll.getOrDefault(wid, 0);
+    /** Inset for tab strip / pattern rows inside the window chrome so controls stay inside the group outline. */
+    private static final int WIN_EXPAND_INNER_PAD = 6;
+
+    private static String windowTabPatScrollKey(String windowId, String tabId) {
+        return windowId + "\t" + tabId;
+    }
+
+    private void removePatScrollKeysForWindow(String windowId) {
+        String prefix = windowId + "\t";
+        windowTabPatScroll.keySet().removeIf(k -> k.startsWith(prefix));
+    }
+
+    /**
+     * Tab id used for menu pattern editing for this window; falls back to the window’s default tab and
+     * remembers the choice.
+     */
+    private String resolvedMenuTabId(ServerProfile p, String windowId) {
+        ChatWindow w = p.getWindow(windowId);
+        if (w == null) {
+            return "";
+        }
+        String t = menuWindowTabId.get(windowId);
+        if (t == null || w.getTabById(t) == null) {
+            t = w.getDefaultTabId();
+            menuWindowTabId.put(windowId, t);
+        }
+        return t;
+    }
+
+    private int patScrollForWindowTab(ServerProfile p, String wid) {
+        String tabId = resolvedMenuTabId(p, wid);
+        return windowTabPatScroll.getOrDefault(windowTabPatScrollKey(wid, tabId), 0);
     }
 
     private static List<String> validWindowIds(ServerProfile p) {
@@ -796,14 +1192,42 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         return best;
     }
 
-    private int expandedWindowContentHeight(ChatWindow w, int patScroll) {
-        List<String> sources = w.getPatternSources();
-        int patMax = Math.max(0, sources.size() - WIN_PAT_VISIBLE);
-        int scroll = Mth.clamp(patScroll, 0, patMax);
-        int visiblePatRows = Math.min(WIN_PAT_VISIBLE, Math.max(0, sources.size() - scroll));
-        int navH = sources.size() > WIN_PAT_VISIBLE ? 18 : 0;
-        // Inner padding + pattern row + nav + pattern list + bottom padding (Hide/Remove live in header row)
-        return 6 + 26 + navH + visiblePatRows * 20 + 8;
+    private int expandedWindowContentHeight(ServerProfile p, String wid, ChatWindow w) {
+        String tabId = resolvedMenuTabId(p, wid);
+        ChatWindowTab tab = w.getTabById(tabId);
+        if (tab == null) {
+            tab = w.getSelectedTab();
+        }
+        List<String> sources = tab.getPatternSources();
+        int visiblePatRows = sources.size();
+        int navH = 0;
+        int pW = Math.max(40, contentW() - 2 * WIN_EXPAND_INNER_PAD);
+        int tabStripH = expandedWindowTabStripHeight(w, pW);
+        // Inner padding + tab strip + pattern row + nav + pattern list + bottom padding
+        return 6 + tabStripH + 26 + navH + visiblePatRows * 20 + 8;
+    }
+
+    private int expandedWindowTabStripHeight(ChatWindow w, int pW) {
+        int plusW = 22;
+        int renameTabW = 102;
+        int removeTabW = w.getTabCount() > 1 ? 80 : 0;
+        int gap = 3;
+        int trail = plusW + gap + renameTabW + (removeTabW > 0 ? gap + removeTabW : 0);
+        int maxTabsW = Math.max(36, pW - trail);
+        int rows = 1;
+        int x = 0;
+        int rowH = 18;
+        List<ChatWindowTab> tabs = w.getTabs();
+        for (ChatWindowTab tab : tabs) {
+            int want = this.font.width(tab.getDisplayName()) + 10;
+            int tw = Mth.clamp(want, 36, 96);
+            if (x > 0 && x + tw > maxTabsW) {
+                rows++;
+                x = 0;
+            }
+            x += tw + gap;
+        }
+        return rows * rowH + (rows - 1) * gap;
     }
 
     private int chatWindowBlockHeight(ServerProfile p, String wid) {
@@ -811,7 +1235,7 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         if (expandedWindowIds.contains(wid)) {
             ChatWindow w = p.getWindow(wid);
             if (w != null) {
-                h += expandedWindowContentHeight(w, patScrollFor(wid));
+                h += expandedWindowContentHeight(p, wid, w);
                 h += WIN_EXPANDED_TAIL_GAP;
             }
         }
@@ -823,74 +1247,446 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
             int fx, int fW, int y) {
         y += 6;
 
-        int fieldW = Math.min(130, fW - 68);
-        EditBox newPat = new EditBox(this.font, fx, y, fieldW, 20, Component.literal("pat"));
+        int px = fx + WIN_EXPAND_INNER_PAD;
+        int pW = Math.max(40, fW - 2 * WIN_EXPAND_INNER_PAD);
+
+        String selTabId = resolvedMenuTabId(p, wid);
+        ChatWindowTab selTab = w.getTabById(selTabId);
+        if (selTab == null) {
+            selTab = w.getSelectedTab();
+            menuWindowTabId.put(wid, selTab.getId());
+            selTabId = selTab.getId();
+        }
+
+        int tabRowY = y;
+        int plusW = 22;
+        int renameTabW = 102;
+        int removeTabW = w.getTabCount() > 1 ? 80 : 0;
+        int gap = 3;
+        List<ChatWindowTab> tabs = w.getTabs();
+        int trail = plusW + gap + renameTabW + (removeTabW > 0 ? gap + removeTabW : 0);
+        int maxTabsW = Math.max(36, pW - trail);
+        int tabsRight = px + maxTabsW;
+
+        int rowH = 18;
+        int tabX = px;
+        int tabY = tabRowY;
+        for (int tabIndex = 0; tabIndex < tabs.size(); tabIndex++) {
+            ChatWindowTab tab = tabs.get(tabIndex);
+            boolean on = tab.getId().equals(selTabId);
+            int want = this.font.width(tab.getDisplayName()) + 10;
+            int tw = Mth.clamp(want, 36, 96);
+            if (tabX > px && tabX + tw > tabsRight) {
+                tabX = px;
+                tabY += rowH + gap;
+            }
+            String label = truncateToWidth(tab.getDisplayName(), tw - 10);
+            final String tid = tab.getId();
+            Runnable select = () -> {
+                menuWindowTabId.put(wid, tid);
+                init();
+            };
+            addChatWindowsScrollClipWidget(
+                    on
+                            ? flatButtonPositive(Component.literal(label), select, tabX, tabY, tw, 18)
+                            : flatButton(Component.literal(label), select, tabX, tabY, tw, 18));
+            menuTabRects.add(new MenuTabRect(wid, tid, tabIndex, tabX, tabY, tabX + tw, tabY + 18));
+            tabX += tw + gap;
+        }
+
+        int buttonsX = px + maxTabsW + gap;
+        addChatWindowsScrollClipWidget(flatButtonPositive(Component.literal("+"), () -> {
+            createWinDialogOpen = false;
+            renameDialogOpen = false;
+            renameTabDialogOpen = false;
+            newTabDlgWindowId = wid;
+            newTabDialogOpen = true;
+            init();
+        }, buttonsX, tabRowY, plusW, 18));
+        buttonsX += plusW + gap;
+        final String renameTid = selTabId;
+        addChatWindowsScrollClipWidget(
+                flatButton(
+                        Component.literal(CHAT_WIN_SYMBOL_RENAME + " Rename Tab"),
+                        () -> {
+                            createWinDialogOpen = false;
+                            renameDialogOpen = false;
+                            newTabDialogOpen = false;
+                            renameTabDlgWindowId = wid;
+                            renameTabDlgTabId = renameTid;
+                            renameTabDialogOpen = true;
+                            init();
+                        },
+                        buttonsX,
+                        tabRowY,
+                        renameTabW,
+                        18));
+        buttonsX += renameTabW + gap;
+        if (removeTabW > 0) {
+            final String removeTid = selTabId;
+            String tabKey = removeTabConfirmKey(wid, removeTid);
+            long nowTab = System.currentTimeMillis();
+            boolean tabArmed = removeTabConfirmDeadlines.getOrDefault(tabKey, 0L) > nowTab;
+            addChatWindowsScrollClipWidget(flatButtonDestructive(
+                    Component.literal(tabArmed ? "✕ Confirm Tab" : "✕ Tab"),
+                    () -> {
+                        long t = System.currentTimeMillis();
+                        if (removeTabConfirmDeadlines.getOrDefault(tabKey, 0L) > t) {
+                            removeTabConfirmDeadlines.remove(tabKey);
+                            if (mgr.removeChatWindowTab(p, wid, removeTid)) {
+                                windowTabPatScroll.remove(windowTabPatScrollKey(wid, removeTid));
+                                ChatWindow w2 = p.getWindow(wid);
+                                if (w2 != null) {
+                                    menuWindowTabId.put(wid, w2.getDefaultTabId());
+                                }
+                            }
+                            init();
+                        } else {
+                            removeTabConfirmDeadlines.put(tabKey, t + DESTRUCTIVE_CONFIRM_MS);
+                            init();
+                        }
+                    },
+                    buttonsX,
+                    tabRowY,
+                    removeTabW,
+                    18));
+        }
+        int tabStripH = expandedWindowTabStripHeight(w, pW);
+        y += tabStripH + 4;
+
+        final String activeTabId = selTabId;
+        int addPatBtnW = 72;
+        int patRowGap = 4;
+        int minField = 64;
+        int minPatRowTotal = minField + addPatBtnW + patRowGap;
+        int desiredPatRowTotal = (int) Math.round(pW * 0.47);
+        int patRowTotal;
+        if (pW <= minPatRowTotal) {
+            patRowTotal = pW;
+        } else {
+            patRowTotal = Math.min(pW, Math.max(minPatRowTotal, desiredPatRowTotal));
+        }
+        int fieldW = patRowTotal - addPatBtnW - patRowGap;
+        EditBox newPat = new EditBox(this.font, px, y, fieldW, 20, Component.literal("pat"));
         newPat.setMaxLength(2048);
         newPat.setHint(ChatUtilitiesScreenLayout.PATTERN_INPUT_HINT);
-        addRenderableWidget(newPat);
-        pendingNewPatterns.add(new PendingNewPattern(newPat, p, wid));
-        addRenderableWidget(flatButton(Component.literal("Add"), () -> {
+        addChatWindowsScrollClipWidget(newPat);
+        pendingNewPatterns.add(new PendingNewPattern(newPat, p, wid, activeTabId));
+        addChatWindowsScrollClipWidget(flatButtonPositive(Component.literal("+ Add"), () -> {
             try {
-                mgr.addPattern(p, wid, newPat.getValue());
+                mgr.addPattern(p, wid, activeTabId, newPat.getValue());
                 newPat.setValue("");
             } catch (PatternSyntaxException ignored) {}
             init();
-        }, fx + fieldW + 4, y, 62, 20));
+        }, px + fieldW + patRowGap, y, addPatBtnW, 20));
         y += 26;
 
-        List<String> sources = w.getPatternSources();
-        int patMax = Math.max(0, sources.size() - WIN_PAT_VISIBLE);
-        int rawScroll = patScrollFor(wid);
-        int scroll = Mth.clamp(rawScroll, 0, patMax);
-        if (scroll != rawScroll) {
-            windowPatScroll.put(wid, scroll);
-        }
-        final String scrollKey = wid;
-        int from = scroll;
-        int to = Math.min(from + WIN_PAT_VISIBLE, sources.size());
-
-        if (sources.size() > WIN_PAT_VISIBLE) {
-            int navBtnW = 40;
-            if (scroll > 0) {
-                addRenderableWidget(flatButton(Component.literal("Earlier"),
-                        () -> {
-                            int s = windowPatScroll.getOrDefault(scrollKey, 0);
-                            windowPatScroll.put(scrollKey, Math.max(0, s - WIN_PAT_VISIBLE));
-                            init();
-                        },
-                        fx, y, navBtnW, 14));
-            }
-            if (scroll < patMax) {
-                addRenderableWidget(flatButton(Component.literal("Later"),
-                        () -> {
-                            int s = windowPatScroll.getOrDefault(scrollKey, 0);
-                            windowPatScroll.put(scrollKey, Math.min(patMax, s + WIN_PAT_VISIBLE));
-                            init();
-                        },
-                        fx + navBtnW + 6, y, navBtnW, 14));
-            }
-            y += 18;
-        }
+        List<String> sources = selTab.getPatternSources();
+        int from = 0;
+        int to = sources.size();
 
         int patXW = 24;
         int patGap = 4;
         for (int pi = from; pi < to; pi++) {
             String src = sources.get(pi);
             int pos = pi + 1;
-            EditBox patEb = new EditBox(this.font, fx, y, fW - patXW - patGap, 20, Component.literal("wp" + pos));
+            EditBox patEb = new EditBox(this.font, px, y, pW - patXW - patGap, 20, Component.literal("wp" + pos));
             patEb.setMaxLength(2048);
             patEb.setValue(src);
             patEb.setHint(ChatUtilitiesScreenLayout.PATTERN_INPUT_HINT);
-            addRenderableWidget(patEb);
-            addRenderableWidget(flatButtonDestructive(Component.literal("✕"), () -> {
-                mgr.removePattern(p, wid, pos);
+            addChatWindowsScrollClipWidget(patEb);
+            addChatWindowsScrollClipWidget(flatButtonDestructive(Component.literal("✕"), () -> {
+                mgr.removePattern(p, wid, activeTabId, pos);
                 init();
-            }, fx + fW - patXW, y, patXW, 20));
-            pendingPatternEdits.add(new PendingPatternEdit(patEb, p, wid, pos));
+            }, px + pW - patXW, y, patXW, 20));
+            pendingPatternEdits.add(new PendingPatternEdit(patEb, p, wid, activeTabId, pos));
             y += 20;
         }
 
         return y + 8;
+    }
+
+    private void buildNewTabDialog(ChatUtilitiesManager mgr, ServerProfile p) {
+        if (newTabDlgWindowId == null || p.getWindow(newTabDlgWindowId) == null) {
+            return;
+        }
+        int dlgW = Math.min(320, Math.max(220, contentW() - 24));
+        int cx = contentCX();
+        int dlgX = cx - dlgW / 2;
+        int dlgY = bodyY() + 20;
+        int dlgInnerPad = 12;
+        int dlgGapAfterTitle = 10;
+        int dlgGapFieldsToButtons = 14;
+        int fieldH = 20;
+        int btnH = 20;
+        newTabDlgX = dlgX;
+        newTabDlgY = dlgY;
+        newTabDlgW = dlgW;
+
+        int titleBaseline = dlgY + dlgInnerPad;
+        int row1Y = titleBaseline + this.font.lineHeight + dlgGapAfterTitle;
+        int btnY = row1Y + fieldH + dlgGapFieldsToButtons;
+        newTabDlgH = btnY - dlgY + btnH + dlgInnerPad;
+
+        int fieldW = dlgW - 2 * dlgInnerPad;
+        dlgNewTabNameField = new EditBox(this.font, dlgX + dlgInnerPad, row1Y, fieldW, fieldH,
+                Component.literal("ntab"));
+        dlgNewTabNameField.setMaxLength(64);
+        dlgNewTabNameField.setHint(Component.literal("Tab name"));
+        addRenderableWidget(dlgNewTabNameField);
+
+        dlgNewTabOkButton = flatButton(
+                Component.literal("Add tab"),
+                () -> submitNewTabDialog(mgr, p),
+                dlgX + dlgInnerPad,
+                btnY,
+                76,
+                btnH);
+        addRenderableWidget(dlgNewTabOkButton);
+
+        dlgNewTabCancelButton = flatButton(Component.literal("Cancel"), () -> closeNewTabDialog(),
+                dlgX + dlgW - dlgInnerPad - 76, btnY, 76, btnH);
+        addRenderableWidget(dlgNewTabCancelButton);
+    }
+
+    private void buildCreateProfileDialog(ChatUtilitiesManager mgr) {
+        int dlgW = Math.min(320, Math.max(220, contentW() - 24));
+        int cx = contentCX();
+        int dlgX = cx - dlgW / 2;
+        int dlgY = bodyY() + 20;
+        int dlgInnerPad = 12;
+        int dlgGapAfterTitle = 10;
+        int dlgGapFieldsToButtons = 14;
+        int fieldH = 20;
+        int btnH = 20;
+        createProfileDlgX = dlgX;
+        createProfileDlgY = dlgY;
+        createProfileDlgW = dlgW;
+
+        int titleBaseline = dlgY + dlgInnerPad;
+        int row1Y = titleBaseline + this.font.lineHeight + dlgGapAfterTitle;
+        int btnY = row1Y + fieldH + dlgGapFieldsToButtons;
+        createProfileDlgH = btnY - dlgY + btnH + dlgInnerPad;
+
+        int fieldW = dlgW - 2 * dlgInnerPad;
+        dlgCreateProfileNameField =
+                new EditBox(this.font, dlgX + dlgInnerPad, row1Y, fieldW, fieldH, Component.literal("nprof"));
+        dlgCreateProfileNameField.setMaxLength(64);
+        dlgCreateProfileNameField.setValue("New Profile");
+        dlgCreateProfileNameField.setHint(Component.literal("Profile name"));
+        addRenderableWidget(dlgCreateProfileNameField);
+
+        dlgCreateProfileOkButton =
+                flatButton(
+                        Component.literal("Create"),
+                        () -> submitCreateProfileDialog(mgr),
+                        dlgX + dlgInnerPad,
+                        btnY,
+                        76,
+                        btnH);
+        addRenderableWidget(dlgCreateProfileOkButton);
+
+        dlgCreateProfileCancelButton =
+                flatButton(
+                        Component.literal("Cancel"),
+                        this::closeCreateProfileDialog,
+                        dlgX + dlgW - dlgInnerPad - 76,
+                        btnY,
+                        76,
+                        btnH);
+        addRenderableWidget(dlgCreateProfileCancelButton);
+    }
+
+    private void buildImportExportChoiceDialog() {
+        int dlgW = Math.min(360, Math.max(240, contentW() - 24));
+        int cx = contentCX();
+        int dlgX = cx - dlgW / 2;
+        int dlgY = bodyY() + 20;
+        int pad = 12;
+        int gap = 8;
+        int btnH = 20;
+        importExportDlgX = dlgX;
+        importExportDlgY = dlgY;
+        importExportDlgW = dlgW;
+        String title = importExportChoiceIsImport ? "Import" : "Export";
+        int titleBaseline = dlgY + pad;
+        int rowY = titleBaseline + this.font.lineHeight + 12;
+        int btnW = dlgW - pad * 2;
+        importExportProfilesOnlyBtn =
+                flatButton(
+                        Component.literal(title + " Profiles Only"),
+                        () -> {
+                            importExportChoiceDialogOpen = false;
+                            if (importExportChoiceIsImport) {
+                                runImportProfilesDialog(false);
+                            } else {
+                                runExportProfilesDialog(false);
+                            }
+                            init();
+                        },
+                        dlgX + pad,
+                        rowY,
+                        btnW,
+                        btnH);
+        addRenderableWidget(importExportProfilesOnlyBtn);
+        rowY += btnH + gap;
+        importExportProfilesAndSettingsBtn =
+                flatButton(
+                        Component.literal(title + " Profiles + Settings"),
+                        () -> {
+                            importExportChoiceDialogOpen = false;
+                            if (importExportChoiceIsImport) {
+                                runImportProfilesDialog(true);
+                            } else {
+                                runExportProfilesDialog(true);
+                            }
+                            init();
+                        },
+                        dlgX + pad,
+                        rowY,
+                        btnW,
+                        btnH);
+        addRenderableWidget(importExportProfilesAndSettingsBtn);
+        rowY += btnH + gap + 6;
+        importExportCancelBtn =
+                flatButton(
+                        Component.literal("Cancel"),
+                        () -> {
+                            importExportChoiceDialogOpen = false;
+                            init();
+                        },
+                        dlgX + pad,
+                        rowY,
+                        btnW,
+                        btnH);
+        addRenderableWidget(importExportCancelBtn);
+        importExportDlgH = rowY - dlgY + btnH + pad;
+    }
+
+    private void closeCreateProfileDialog() {
+        createProfileDialogOpen = false;
+        init();
+    }
+
+    private void submitCreateProfileDialog(ChatUtilitiesManager mgr) {
+        if (dlgCreateProfileNameField == null) {
+            return;
+        }
+        String name = dlgCreateProfileNameField.getValue().strip();
+        if (name.isEmpty()) {
+            return;
+        }
+        ServerProfile created = mgr.createProfileForCurrentServer(name);
+        selectedProfileId = created.getId();
+        activePanel = Panel.EDIT_PROFILE;
+        createProfileDialogOpen = false;
+        init();
+    }
+
+    private void closeNewTabDialog() {
+        newTabDialogOpen = false;
+        newTabDlgWindowId = null;
+        init();
+    }
+
+    private void submitNewTabDialog(ChatUtilitiesManager mgr, ServerProfile p) {
+        if (dlgNewTabNameField == null || newTabDlgWindowId == null) {
+            return;
+        }
+        String name = dlgNewTabNameField.getValue().strip();
+        if (name.isEmpty()) {
+            return;
+        }
+        if (mgr.addChatWindowTab(p, newTabDlgWindowId, name)) {
+            ChatWindow w = p.getWindow(newTabDlgWindowId);
+            if (w != null) {
+                ChatWindowTab last = w.getTabs().get(w.getTabCount() - 1);
+                menuWindowTabId.put(newTabDlgWindowId, last.getId());
+            }
+            newTabDialogOpen = false;
+            newTabDlgWindowId = null;
+            init();
+        }
+    }
+
+    private void buildRenameTabDialog(ChatUtilitiesManager mgr, ServerProfile p) {
+        if (renameTabDlgWindowId == null
+                || renameTabDlgTabId == null
+                || p.getWindow(renameTabDlgWindowId) == null) {
+            return;
+        }
+        ChatWindowTab tab = p.getWindow(renameTabDlgWindowId).getTabById(renameTabDlgTabId);
+        if (tab == null) {
+            return;
+        }
+        int dlgW = Math.min(320, Math.max(220, contentW() - 24));
+        int cx = contentCX();
+        int dlgX = cx - dlgW / 2;
+        int dlgY = bodyY() + 20;
+        int dlgInnerPad = 12;
+        int dlgGapAfterTitle = 10;
+        int dlgGapFieldsToButtons = 14;
+        int fieldH = 20;
+        int btnH = 20;
+        renameTabDlgX = dlgX;
+        renameTabDlgY = dlgY;
+        renameTabDlgW = dlgW;
+
+        int titleBaseline = dlgY + dlgInnerPad;
+        int row1Y = titleBaseline + this.font.lineHeight + dlgGapAfterTitle;
+        int btnY = row1Y + fieldH + dlgGapFieldsToButtons;
+        renameTabDlgH = btnY - dlgY + btnH + dlgInnerPad;
+
+        int fieldW = dlgW - 2 * dlgInnerPad;
+        dlgRenameTabNameField =
+                new EditBox(this.font, dlgX + dlgInnerPad, row1Y, fieldW, fieldH, Component.literal("rtab"));
+        dlgRenameTabNameField.setMaxLength(64);
+        dlgRenameTabNameField.setValue(tab.getDisplayName());
+        dlgRenameTabNameField.setHint(Component.literal("Tab name"));
+        addRenderableWidget(dlgRenameTabNameField);
+
+        dlgRenameTabOkButton =
+                flatButton(
+                        Component.literal("Rename"),
+                        () -> submitRenameTabDialog(mgr, p),
+                        dlgX + dlgInnerPad,
+                        btnY,
+                        76,
+                        btnH);
+        addRenderableWidget(dlgRenameTabOkButton);
+
+        dlgRenameTabCancelButton =
+                flatButton(
+                        Component.literal("Cancel"),
+                        () -> closeRenameTabDialog(),
+                        dlgX + dlgW - dlgInnerPad - 76,
+                        btnY,
+                        76,
+                        btnH);
+        addRenderableWidget(dlgRenameTabCancelButton);
+    }
+
+    private void closeRenameTabDialog() {
+        renameTabDialogOpen = false;
+        renameTabDlgWindowId = null;
+        renameTabDlgTabId = null;
+        init();
+    }
+
+    private void submitRenameTabDialog(ChatUtilitiesManager mgr, ServerProfile p) {
+        if (dlgRenameTabNameField == null || renameTabDlgWindowId == null || renameTabDlgTabId == null) {
+            return;
+        }
+        String name = dlgRenameTabNameField.getValue().strip();
+        if (name.isEmpty()) {
+            return;
+        }
+        if (mgr.renameChatWindowTab(p, renameTabDlgWindowId, renameTabDlgTabId, name)) {
+            renameTabDialogOpen = false;
+            renameTabDlgWindowId = null;
+            renameTabDlgTabId = null;
+            init();
+        }
     }
 
     private void buildCreateWindowDialog(ChatUtilitiesManager mgr, ServerProfile p) {
@@ -993,9 +1789,19 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
             if (expandedWindowIds.remove(renameDlgOldId)) {
                 expandedWindowIds.add(newId);
             }
-            Integer patScroll = windowPatScroll.remove(renameDlgOldId);
-            if (patScroll != null) {
-                windowPatScroll.put(newId, patScroll);
+            ChatWindow renamed = p.getWindow(newId);
+            if (renamed != null) {
+                for (ChatWindowTab tab : renamed.getTabs()) {
+                    String ok = windowTabPatScrollKey(renameDlgOldId, tab.getId());
+                    String nk = windowTabPatScrollKey(newId, tab.getId());
+                    if (windowTabPatScroll.containsKey(ok)) {
+                        windowTabPatScroll.put(nk, windowTabPatScroll.remove(ok));
+                    }
+                }
+            }
+            String sel = menuWindowTabId.remove(renameDlgOldId);
+            if (sel != null) {
+                menuWindowTabId.put(newId, sel);
             }
             renameDialogOpen = false;
             renameDlgOldId = null;
@@ -1033,32 +1839,37 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         pendingPatternEdits.clear();
         pendingNewPatterns.clear();
         winChromeRects.clear();
+        menuTabRects.clear();
+        menuDragWindowId = null;
+        menuDragTabId = null;
+        menuDragFromIndex = -1;
+        menuDragHoverIndex = -1;
+        menuDragPressX = 0;
+        menuDragPressY = 0;
+        menuDragDidMove = false;
         ChatUtilitiesManager mgr = ChatUtilitiesManager.get();
 
         int fx = contentLeft();
         final String pid = selectedProfileId;
 
         List<String> winIds = validWindowIds(p);
+        if (p.getId().equals(menuExpandedChatWindowsProfileId)) {
+            expandedWindowIds.addAll(menuExpandedChatWindowsPersisted);
+        }
         expandedWindowIds.removeIf(w -> p.getWindow(w) == null);
 
-        int listBottom = footerY() - WIN_LIST_FOOTER_GAP;
-        chatWindowsListViewportHeight = Math.max(0, listBottom - bodyY());
+        int listTop = chatWindowsScrollViewportTop();
+        int listBottom = chatWindowsScrollViewportBottom();
+        chatWindowsListViewportHeight = Math.max(0, listBottom - listTop);
         chatWindowsTotalListHeight = 0;
         for (String wid : winIds) {
             chatWindowsTotalListHeight += chatWindowBlockHeight(p, wid);
         }
         chatWindowsShowScrollbar =
                 chatWindowsTotalListHeight > chatWindowsListViewportHeight && !winIds.isEmpty();
-        int fW = contentW() - (chatWindowsShowScrollbar ? ThinScrollbar.W : 0);
-        int y = bodyY();
-
-        int maxWinScroll = maxChatWindowListScroll(p, winIds, listBottom);
-        winScroll = Mth.clamp(winScroll, 0, maxWinScroll);
-
-        chatWindowsListScrollPixels = 0;
-        for (int j = 0; j < winScroll && j < winIds.size(); j++) {
-            chatWindowsListScrollPixels += chatWindowBlockHeight(p, winIds.get(j));
-        }
+        chatWindowsListScrollPixels = Mth.clamp(chatWindowsListScrollPixels, 0, chatWindowsMaxContentScroll());
+        int fW = contentW() - scrollbarReserve(chatWindowsShowScrollbar);
+        int yLogical = listTop;
 
         int rowW = fW;
         int gapBtn = 3;
@@ -1068,15 +1879,34 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         int rightBlockW = visW + renameW + removeW + 3 * gapBtn;
         int toggleW = Math.max(48, rowW - rightBlockW);
 
-        int i = winScroll;
-        for (; i < winIds.size(); i++) {
+        // Map the stored pixel scroll to the first visible block index so removed() persistence stays reasonable.
+        int accumBefore = 0;
+        winScroll = 0;
+        for (int j = 0; j < winIds.size(); j++) {
+            int bh = chatWindowBlockHeight(p, winIds.get(j));
+            if (accumBefore + bh > chatWindowsListScrollPixels) {
+                winScroll = j;
+                break;
+            }
+            accumBefore += bh;
+            winScroll = j + 1;
+        }
+        winScroll = Mth.clamp(winScroll, 0, Math.max(0, winIds.size() - 1));
+
+        for (int i = 0; i < winIds.size(); i++) {
             String wid = winIds.get(i);
             int blockH = chatWindowBlockHeight(p, wid);
-            if (y + blockH > listBottom) {
+            int y = yLogical - chatWindowsListScrollPixels;
+            if (y + blockH < listTop - 40) {
+                yLogical += blockH;
+                continue;
+            }
+            if (y > listBottom + 40) {
                 break;
             }
             ChatWindow wObj = p.getWindow(wid);
             if (wObj == null) {
+                yLogical += blockH;
                 continue;
             }
             boolean expanded = expandedWindowIds.contains(wid);
@@ -1085,13 +1915,13 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
 
             final String fwid = wid;
             int rowTop = y;
-            addRenderableWidget(flatButton(Component.literal(headText), () -> {
+            addChatWindowsScrollClipWidget(flatButton(Component.literal(headText), () -> {
                 if (expandedWindowIds.contains(fwid)) {
                     expandedWindowIds.remove(fwid);
-                    windowPatScroll.remove(fwid);
                 } else {
                     expandedWindowIds.add(fwid);
                 }
+                persistMenuExpandedChatWindows(p);
                 init();
             }, fx, y, toggleW, 18));
 
@@ -1111,12 +1941,13 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                     18);
             visBtn.setTooltip(Tooltip.create(Component.literal(
                     wObj.isVisible() ? "Hide window" : "Show window")));
-            addRenderableWidget(visBtn);
+            addChatWindowsScrollClipWidget(visBtn);
             bx += visW + gapBtn;
-            addRenderableWidget(flatButton(
+            addChatWindowsScrollClipWidget(flatButton(
                     Component.literal(CHAT_WIN_SYMBOL_RENAME + " Rename"),
                     () -> {
                         createWinDialogOpen = false;
+                        renameTabDialogOpen = false;
                         renameDlgOldId = fwid;
                         renameDialogOpen = true;
                         init();
@@ -1128,7 +1959,7 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
             bx += renameW + gapBtn;
             long nowRm = System.currentTimeMillis();
             boolean removeArmed = removeWindowConfirmDeadlines.getOrDefault(fwid, 0L) > nowRm;
-            addRenderableWidget(flatButtonDestructive(
+            addChatWindowsScrollClipWidget(flatButtonDestructive(
                     Component.literal(removeArmed ? "✕ Confirm Removal" : "✕ Remove"),
                     () -> {
                         long t = System.currentTimeMillis();
@@ -1136,7 +1967,8 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                             removeWindowConfirmDeadlines.remove(fwid);
                             mgr.removeWindow(p, fwid);
                             expandedWindowIds.remove(fwid);
-                            windowPatScroll.remove(fwid);
+                            removePatScrollKeysForWindow(fwid);
+                            menuWindowTabId.remove(fwid);
                             List<String> ids = p.getWindowIds();
                             winScroll = Math.min(winScroll, Math.max(0, ids.size() - 1));
                             init();
@@ -1157,19 +1989,22 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                 winChromeRects.add(new WinChromeRect(fx - 4, rowTop - 4, fx + rowW + 4, y + 4));
                 y += WIN_EXPANDED_TAIL_GAP;
             }
+            yLogical += blockH;
         }
 
         int footY = footerY();
         int createBtnW = 124;
         int footerBtnGap = 6;
         int adjustBtnW = 130;
-        addRenderableWidget(flatButtonPositive(Component.literal("+ Create Window"), () -> {
+        addChatWindowsNonClipWidget(flatButtonPositive(Component.literal("+ Create Window"), () -> {
             renameDialogOpen = false;
             renameDlgOldId = null;
+            newTabDialogOpen = false;
+            renameTabDialogOpen = false;
             createWinDialogOpen = true;
             init();
         }, contentLeft(), footY, createBtnW, 20));
-        addRenderableWidget(flatButton(ChatUtilitiesScreenLayout.BUTTON_ADJUST_LAYOUT, () -> {
+        addChatWindowsNonClipWidget(flatButton(ChatUtilitiesScreenLayout.BUTTON_ADJUST_LAYOUT, () -> {
             if (pid == null || profile() == null) return;
             mgr.enableAllWindowsPositioning(pid);
             mgr.setRestoreScreenAfterPosition(
@@ -1183,162 +2018,877 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         if (renameDialogOpen) {
             buildRenameWindowDialog(mgr, p);
         }
+        if (newTabDialogOpen) {
+            buildNewTabDialog(mgr, p);
+        }
+        if (renameTabDialogOpen) {
+            buildRenameTabDialog(mgr, p);
+        }
     }
 
-    // ── Ignored Chat panel ────────────────────────────────────────────────────
+    // ── Chat Actions panel (ignore + play sound + color highlight) ─────────────
 
-    private static final int IGN_ROWS = 9;
+    /** Max number of pattern groups listed before the pager scrolls. */
+    private static final int ACTION_GROUP_PAGE = 6;
 
-    private void buildIgnoredChatWidgets() {
-        ServerProfile p = profile();
-        if (p == null) return;
+    private static ChatActionEffect.Type cycleChatActionType(ChatActionEffect.Type t) {
+        return switch (t) {
+            case IGNORE -> ChatActionEffect.Type.PLAY_SOUND;
+            case PLAY_SOUND -> ChatActionEffect.Type.COLOR_HIGHLIGHT;
+            case COLOR_HIGHLIGHT -> ChatActionEffect.Type.TEXT_REPLACEMENT;
+            case TEXT_REPLACEMENT -> ChatActionEffect.Type.AUTO_RESPONSE;
+            case AUTO_RESPONSE -> ChatActionEffect.Type.IGNORE;
+        };
+    }
+
+    private static Component chatEffectTypeButtonCaption(ChatActionEffect.Type t) {
+        String key =
+                switch (t) {
+                    case IGNORE -> "chat-utilities.chat_actions.type.ignore";
+                    case PLAY_SOUND -> "chat-utilities.chat_actions.type.play_sound";
+                    case COLOR_HIGHLIGHT -> "chat-utilities.chat_actions.type.color_highlight";
+                    case TEXT_REPLACEMENT -> "chat-utilities.chat_actions.type.text_replacement";
+                    case AUTO_RESPONSE -> "chat-utilities.chat_actions.type.auto_response";
+                };
+        return Component.translatable(key);
+    }
+
+    private static String chatActionGroupPreview(ChatActionGroup grp) {
+        if (grp == null) {
+            return "<pattern> -> <effects>";
+        }
+        String pat = grp.getPatternSource() == null ? "" : grp.getPatternSource().strip();
+        if (pat.isEmpty()) {
+            pat = "<pattern>";
+        }
+        if (pat.length() > 36) {
+            pat = pat.substring(0, 36) + "…";
+        }
+        StringBuilder b = new StringBuilder();
+        b.append(pat);
+        List<ChatActionEffect> effs = grp.getEffects();
+        if (effs == null || effs.isEmpty()) {
+            b.append(" -> <no effects>");
+            return b.toString();
+        }
+        for (ChatActionEffect e : effs) {
+            b.append(" -> ").append(effectPreviewName(e != null ? e.getType() : null));
+        }
+        return b.toString();
+    }
+
+    private static String effectPreviewName(ChatActionEffect.Type type) {
+        if (type == null) {
+            return "Ignore";
+        }
+        return switch (type) {
+            case IGNORE -> "Ignore";
+            case PLAY_SOUND -> "Play Sound";
+            case COLOR_HIGHLIGHT -> "Color Highlight";
+            case TEXT_REPLACEMENT -> "Text Replacement";
+            case AUTO_RESPONSE -> "Auto Response";
+        };
+    }
+
+    private void clearPendingChatHighlightPickState() {
+        chatHighlightPickProfileId = null;
+        chatHighlightPickGroupIndex = -1;
+        chatHighlightPickEffectIndex = -1;
+    }
+
+    private void clearPendingChatActionTypePickState() {
+        chatActionTypePickProfileId = null;
+        chatActionTypePickGroupIndex = -1;
+        chatActionTypePickEffectIndex = -1;
+        chatActionTypeDropdownOpen = false;
+        chatActionTypeDropX = 0;
+        chatActionTypeDropY = 0;
+        chatActionTypeDropW = 0;
+        chatActionTypeDropH = 0;
+    }
+
+    private void openChatActionTypeDropdown(ServerProfile prof, int groupIndex, int effectIndex, int anchorX, int anchorY, int anchorW) {
+        clearPendingChatActionTypePickState();
+        chatActionTypePickProfileId = prof != null ? prof.getId() : null;
+        chatActionTypePickGroupIndex = groupIndex;
+        chatActionTypePickEffectIndex = effectIndex;
+        int rowH = 18;
+        int pad = 6;
+        int widest = 0;
+        for (ChatActionEffect.Type t : ChatActionEffect.Type.values()) {
+            widest = Math.max(widest, this.font.width(chatEffectTypeButtonCaption(t)));
+        }
+        int w = Math.max(anchorW, widest + pad * 2);
+        int h = ChatActionEffect.Type.values().length * rowH;
+        int x = anchorX;
+        int y = anchorY + rowH + 2;
+        // Keep inside content panel.
+        int maxX = contentRight() - 4;
+        x = Math.min(x, maxX - w);
+        x = Math.max(x, contentLeft() + 4);
+        int maxY = footerY() - 6;
+        if (y + h > maxY) {
+            y = Math.max(bodyY(), anchorY - h - 2);
+        }
+        chatActionTypeDropX = x;
+        chatActionTypeDropY = y;
+        chatActionTypeDropW = w;
+        chatActionTypeDropH = h;
+        chatActionTypeDropdownOpen = true;
+    }
+
+    private void renderChatActionTypeDropdownOnTop(GuiGraphics g, int mouseX, int mouseY) {
+        if (!chatActionTypeDropdownOpen || activePanel != Panel.CHAT_ACTIONS) {
+            return;
+        }
+        int x = chatActionTypeDropX;
+        int y = chatActionTypeDropY;
+        int w = chatActionTypeDropW;
+        int h = chatActionTypeDropH;
+        int rowH = 18;
+        g.fill(x, y, x + w, y + h, 0xF0101012);
+        g.renderOutline(x, y, w, h, 0xFF2C2C3A);
+        ChatActionEffect.Type[] types = ChatActionEffect.Type.values();
+        for (int i = 0; i < types.length; i++) {
+            int ry = y + i * rowH;
+            boolean hover = mouseX >= x && mouseX < x + w && mouseY >= ry && mouseY < ry + rowH;
+            if (hover) {
+                g.fill(x + 1, ry, x + w - 1, ry + rowH, 0x203A6AC8);
+            }
+            Component cap = chatEffectTypeButtonCaption(types[i]);
+            g.drawString(this.font, cap, x + 6, ry + (rowH - 8) / 2, 0xFFE0E0E8, false);
+        }
+    }
+
+    private void openChatHighlightColorPicker(ServerProfile prof, int groupIndex, int effectIndex) {
+        clearPendingChatHighlightPickState();
+        chatHighlightPickProfileId = prof.getId();
+        chatHighlightPickGroupIndex = groupIndex;
+        chatHighlightPickEffectIndex = effectIndex;
+        int initialRgb;
+        boolean b0, i0, u0, s0, o0;
+        if (groupIndex >= 0 && effectIndex >= 0) {
+            ChatActionEffect eff =
+                    prof.getChatActionGroups().get(groupIndex).getEffects().get(effectIndex);
+            initialRgb = eff.getHighlightColorRgb();
+            b0 = eff.isHighlightBold();
+            i0 = eff.isHighlightItalic();
+            u0 = eff.isHighlightUnderlined();
+            s0 = eff.isHighlightStrikethrough();
+            o0 = eff.isHighlightObfuscated();
+        } else {
+            initialRgb = chatActionNewHighlightRgb;
+            b0 = chatActionNewHlBold;
+            i0 = chatActionNewHlItalic;
+            u0 = chatActionNewHlUnderlined;
+            s0 = chatActionNewHlStrikethrough;
+            o0 = chatActionNewHlObfuscated;
+        }
+        modColorPickerOverlay =
+                ModPrimaryColorPickerOverlay.createChatHighlightRgb(
+                        initialRgb, b0, i0, u0, s0, o0, this::applyChatHighlightPickFromPicker);
+    }
+
+    private void applyChatHighlightPickFromPicker(ModPrimaryColorPickerOverlay.ChatHighlightPick pick) {
         ChatUtilitiesManager mgr = ChatUtilitiesManager.get();
-
-        int fx  = contentLeft();
-        int fW  = Math.min(240, contentW());
-        int addW = 72;
-        int y   = bodyY();
-
-        newIgnoreField = new EditBox(this.font, fx, y, fW - addW - 4, 20, Component.literal("ign"));
-        newIgnoreField.setMaxLength(2048);
-        newIgnoreField.setHint(ChatUtilitiesScreenLayout.PATTERN_INPUT_HINT);
-        addRenderableWidget(newIgnoreField);
-        addRenderableWidget(flatButton(Component.literal("Add Ignore"), () -> {
-            try {
-                mgr.addIgnorePattern(p, newIgnoreField.getValue());
-                newIgnoreField.setValue("");
-            } catch (PatternSyntaxException ignored) {}
-            init();
-        }, fx + fW - addW, y, addW, 20));
-        y += 26;
-
-        List<String> ignores = p.getIgnorePatternSources();
-        int igMax = Math.max(0, ignores.size() - IGN_ROWS);
-        ignScroll = Math.min(ignScroll, igMax);
-        int igEnd = Math.min(ignScroll + IGN_ROWS, ignores.size());
-        int ignPatXW = 24;
-        int ignPatGap = 4;
-        for (int i = ignScroll; i < igEnd; i++) {
-            String pat = ignores.get(i);
-            int idx = i;
-            EditBox ignEb = new EditBox(this.font, fx, y, fW - ignPatXW - ignPatGap, 20, Component.literal("ign" + idx));
-            ignEb.setMaxLength(2048);
-            ignEb.setValue(pat);
-            ignEb.setHint(ChatUtilitiesScreenLayout.PATTERN_INPUT_HINT);
-            addRenderableWidget(ignEb);
-            addRenderableWidget(flatButtonDestructive(Component.literal("✕"), () -> {
-                mgr.removeIgnorePattern(p, idx);
-                init();
-            }, fx + fW - ignPatXW, y, ignPatXW, 20));
-            pendingIgnoreEdits.add(new PendingIgnoreEdit(ignEb, p, idx));
-            y += 20;
+        ServerProfile prof =
+                chatHighlightPickProfileId != null ? mgr.getProfile(chatHighlightPickProfileId) : profile();
+        if (prof == null) {
+            clearPendingChatHighlightPickState();
+            return;
         }
-        if (igMax > 0) {
-            if (ignScroll > 0)
-                addRenderableWidget(flatButton(Component.literal("▲"),
-                        () -> { ignScroll = Math.max(0, ignScroll - 1); init(); },
-                        fx, y, 20, 14));
-            if (ignScroll < igMax)
-                addRenderableWidget(flatButton(Component.literal("▼"),
-                        () -> { ignScroll = Math.min(igMax, ignScroll + 1); init(); },
-                        fx + 24, y, 20, 14));
+        int rgb = pick.rgb() & 0xFFFFFF;
+        if (chatHighlightPickGroupIndex >= 0 && chatHighlightPickEffectIndex >= 0) {
+            mgr.setChatActionHighlightStyle(
+                    prof,
+                    chatHighlightPickGroupIndex,
+                    chatHighlightPickEffectIndex,
+                    rgb,
+                    pick.bold(),
+                    pick.italic(),
+                    pick.underlined(),
+                    pick.strikethrough(),
+                    pick.obfuscated());
+        } else {
+            chatActionNewHighlightRgb = rgb;
+            chatActionNewHlBold = pick.bold();
+            chatActionNewHlItalic = pick.italic();
+            chatActionNewHlUnderlined = pick.underlined();
+            chatActionNewHlStrikethrough = pick.strikethrough();
+            chatActionNewHlObfuscated = pick.obfuscated();
         }
+        clearPendingChatHighlightPickState();
     }
 
-    // ── Chat Sounds panel ─────────────────────────────────────────────────────
+    private AbstractWidget chatHighlightPickColorRowWidget(int x, int y, int w, int h, int rgb, Runnable onOpenPicker) {
+        return new AbstractWidget(x, y, w, h, Component.empty()) {
+            @Override
+            public void onClick(MouseButtonEvent event, boolean dbl) {
+                onOpenPicker.run();
+            }
 
-    private static final int RULE_ROWS = 7;
+            @Override
+            protected void renderWidget(GuiGraphics g, int mx, int my, float pt) {
+                boolean hov = this.isHovered();
+                boolean act = this.active;
+                int bg = !act ? 0x25000000 : hov ? 0x55FFFFFF : 0x35000000;
+                int outline = !act ? 0x25FFFFFF : hov ? 0x70FFFFFF : 0x40FFFFFF;
+                g.fill(getX(), getY(), getX() + getWidth(), getY() + getHeight(), bg);
+                g.renderOutline(getX(), getY(), getWidth(), getHeight(), outline);
+                int sw = rgb | 0xFF000000;
+                int sx = getX() + 6;
+                int sy = getY() + (getHeight() - 14) / 2;
+                g.fill(sx, sy, sx + 14, sy + 14, sw);
+                g.renderOutline(sx, sy, 14, 14, 0xFFAAAAAA);
+                String cap = I18n.get("chat-utilities.chat_actions.color_highlight.pick");
+                g.drawString(
+                        Minecraft.getInstance().font,
+                        cap,
+                        sx + 18,
+                        getY() + (getHeight() - 8) / 2,
+                        0xFFBBBBCC,
+                        false);
+            }
 
-    private void buildChatSoundsWidgets() {
+            @Override
+            public void updateWidgetNarration(NarrationElementOutput n) {
+                defaultButtonNarrationText(n);
+            }
+        };
+    }
+
+    private void buildChatActionsWidgets() {
         ServerProfile p = profile();
-        if (p == null) return;
+        if (p == null) {
+            return;
+        }
         ChatUtilitiesManager mgr = ChatUtilitiesManager.get();
 
         int fx = contentLeft();
-        int fW = profileSoundsFormWidth();
-        int y  = bodyY();
+        int y = bodyY();
+        soundField = null;
+        EditBox targetField = null;
 
-        patternField = new EditBox(this.font, fx, y, fW, 20, Component.literal("pat"));
+        int g = 3;
+        int fh = CHAT_ACTION_FIELD_H;
+        int patW = CHAT_ACTION_ADD_PAT_W;
+        int actW = CHAT_ACTION_ACTION_BTN_W;
+        int addW = CHAT_ACTION_ADD_BTN_W;
+        int testW = Mth.clamp(this.font.width("🔊 Test Sound") + 12, 56, 120);
+        int sndW = CHAT_ACTION_SOUND_FIELD_W;
+        int tgtW = CHAT_ACTION_SOUND_FIELD_W;
+
+        int minWPlay = patW + g + actW + g + sndW + g + testW + g + addW;
+        int minWHighlight = patW + g + actW + g + CHAT_ACTION_HIGHLIGHT_PICK_W + g + addW;
+        int minWTarget = patW + g + actW + g + tgtW + g + addW;
+        int baseFormW = Math.min(CHAT_ACTIONS_FORM_CAP, contentW());
+        int listRowFormW =
+                Math.min(contentW(), Math.max(baseFormW, Math.max(minWPlay, minWHighlight)));
+
+        int bx = fx + patW + g;
+        patternField = new EditBox(this.font, fx, y, patW, fh, Component.literal("capat"));
         patternField.setMaxLength(2048);
         patternField.setHint(ChatUtilitiesScreenLayout.PATTERN_INPUT_HINT);
+        patternField.setValue(chatActionNewPatternDraft);
+        patternField.setResponder(v -> chatActionNewPatternDraft = v);
         addRenderableWidget(patternField);
-        y += 26;
+        int typeBtnX = bx;
+        int typeBtnY = y;
+        addRenderableWidget(
+                flatButton(
+                        Component.literal("⚙ ").append(chatEffectTypeButtonCaption(chatActionNewType)),
+                        () -> {
+                            openChatActionTypeDropdown(p, -1, -1, typeBtnX, typeBtnY, actW);
+                        },
+                        bx,
+                        y,
+                        actW,
+                        fh));
+        bx += actW + g;
 
-        soundField = new EditBox(this.font, fx, y, fW, 20, Component.literal("snd"));
-        soundField.setMaxLength(256);
-        soundField.setHint(Component.literal("Sound id…"));
-        addRenderableWidget(soundField);
-        y += 26;
+        if (chatActionNewType == ChatActionEffect.Type.PLAY_SOUND) {
+            soundField = new EditBox(this.font, bx, y, sndW, fh, Component.literal("casnd"));
+            soundField.setMaxLength(256);
+            soundField.setHint(Component.literal("Sound id…"));
+            addRenderableWidget(soundField);
+            bx += sndW + g;
+            addRenderableWidget(
+                    flatButton(
+                            Component.literal("🔊 Test Sound"),
+                            () -> ChatUtilitiesManager.parseSoundId(soundField.getValue())
+                                    .filter(ChatUtilitiesManager::isRegisteredSound)
+                                    .ifPresent(ChatUtilitiesManager::playSoundPreview),
+                            bx,
+                            y,
+                            testW,
+                            fh));
+            bx += testW + g;
+            addRenderableWidget(
+                    flatButtonPositive(
+                            Component.literal("＋ Add Action"),
+                            () -> {
+                                try {
+                                    mgr.addChatAction(
+                                            p,
+                                            chatActionNewType,
+                                            patternField.getValue(),
+                                            soundField.getValue());
+                                } catch (IllegalArgumentException ignored) {
+                                }
+                                chatActionNewPatternDraft = "";
+                                patternField.setValue("");
+                                if (soundField != null) {
+                                    soundField.setValue("");
+                                }
+                                init();
+                            },
+                            bx,
+                            y,
+                            addW,
+                            fh));
+        } else if (chatActionNewType == ChatActionEffect.Type.TEXT_REPLACEMENT
+                || chatActionNewType == ChatActionEffect.Type.AUTO_RESPONSE) {
+            targetField = new EditBox(this.font, bx, y, tgtW, fh, Component.literal("catgt"));
+            targetField.setMaxLength(2048);
+            targetField.setHint(
+                    Component.literal(
+                            chatActionNewType == ChatActionEffect.Type.AUTO_RESPONSE ? "Response text…" : "Replacement text…"));
+            addRenderableWidget(targetField);
+            bx += tgtW + g;
+            EditBox finalTargetField = targetField;
+            addRenderableWidget(
+                    flatButtonPositive(
+                            Component.literal("＋ Add Action"),
+                            () -> {
+                                try {
+                                    mgr.addChatAction(
+                                            p,
+                                            chatActionNewType,
+                                            patternField.getValue(),
+                                            finalTargetField.getValue());
+                                } catch (IllegalArgumentException ignored) {
+                                }
+                                chatActionNewPatternDraft = "";
+                                patternField.setValue("");
+                                finalTargetField.setValue("");
+                                init();
+                            },
+                            bx,
+                            y,
+                            addW,
+                            fh));
+        } else if (chatActionNewType == ChatActionEffect.Type.COLOR_HIGHLIGHT) {
+            addRenderableWidget(
+                    chatHighlightPickColorRowWidget(
+                            bx,
+                            y,
+                            CHAT_ACTION_HIGHLIGHT_PICK_W,
+                            fh,
+                            chatActionNewHighlightRgb,
+                            () -> openChatHighlightColorPicker(p, -1, -1)));
+            bx += CHAT_ACTION_HIGHLIGHT_PICK_W + g;
+            addRenderableWidget(
+                    flatButtonPositive(
+                            Component.literal("＋ Add Action"),
+                            () -> {
+                                try {
+                                    mgr.addChatAction(
+                                            p,
+                                            chatActionNewType,
+                                            patternField.getValue(),
+                                            "",
+                                            chatActionNewHighlightRgb,
+                                            chatActionNewHlBold,
+                                            chatActionNewHlItalic,
+                                            chatActionNewHlUnderlined,
+                                            chatActionNewHlStrikethrough,
+                                            chatActionNewHlObfuscated);
+                                } catch (IllegalArgumentException ignored) {
+                                }
+                                chatActionNewPatternDraft = "";
+                                patternField.setValue("");
+                                init();
+                            },
+                            bx,
+                            y,
+                            addW,
+                            fh));
+        } else {
+            addRenderableWidget(
+                    flatButtonPositive(
+                            Component.literal("＋ Add Action"),
+                            () -> {
+                                try {
+                                    mgr.addChatAction(
+                                            p,
+                                            chatActionNewType,
+                                            patternField.getValue(),
+                                            "");
+                                } catch (IllegalArgumentException ignored) {
+                                }
+                                chatActionNewPatternDraft = "";
+                                patternField.setValue("");
+                                init();
+                            },
+                            bx,
+                            y,
+                            addW,
+                            fh));
+        }
+        y += fh + 14;
 
-        addRenderableWidget(flatButton(Component.literal("Test Sound"), () ->
-                ChatUtilitiesManager.parseSoundId(soundField.getValue())
-                        .filter(ChatUtilitiesManager::isRegisteredSound)
-                        .ifPresent(id -> ChatUtilitiesManager.playSoundPreview(id))
-        , fx, y, fW, 20));
-        y += 26;
-        addRenderableWidget(flatButton(Component.literal("Add Rule"), () -> {
-            try {
-                mgr.addMessageSound(p, patternField.getValue(), soundField.getValue());
-                patternField.setValue("");
-            } catch (IllegalArgumentException ignored) {}
-            init();
-        }, fx, y, fW, 20));
-        y += 26;
-
-        List<me.braydon.chatutilities.chat.MessageSoundRule> rules = p.getMessageSounds();
-        int rMax = Math.max(0, rules.size() - RULE_ROWS);
-        ruleScroll = Math.min(ruleScroll, rMax);
-        int rEnd = Math.min(ruleScroll + RULE_ROWS, rules.size());
+        List<ChatActionGroup> groups = p.getChatActionGroups();
+        int rMax = Math.max(0, groups.size() - ACTION_GROUP_PAGE);
+        actionScroll = Math.min(actionScroll, rMax);
+        int gEnd = Math.min(actionScroll + ACTION_GROUP_PAGE, groups.size());
         int ruleXW = 24;
         int ruleGap = 4;
-        int ruleInner = fW - ruleXW - ruleGap;
-        int ruleSndW = Math.min(140, ruleInner / 2);
-        int rulePatW = ruleInner - ruleSndW - ruleGap;
-        for (int i = ruleScroll; i < rEnd; i++) {
-            MessageSoundRule rule = rules.get(i);
-            int idx = i;
-            Identifier sid = ChatUtilitiesManager.parseSoundId(rule.getSoundId()).orElse(null);
-            String sndDisp = sid != null ? sid.toString() : rule.getSoundId();
+        int collapseW = 18;
+        int typeBtnW = CHAT_ACTION_ACTION_BTN_W;
+        int ruleTestW = Mth.clamp(this.font.width("🔊 Test Sound") + 12, 56, 120);
+        int rfh = CHAT_ACTION_FIELD_H;
+        int ruleInner = listRowFormW - ruleXW - ruleGap;
+        for (int gi = actionScroll; gi < gEnd; gi++) {
+            final int gix = gi;
+            ChatActionGroup grp = groups.get(gi);
+            boolean collapsed = collapsedChatActionGroups.contains(gi);
+            int groupChromeTop = y;
+            int rx = fx;
+            int groupPatW = Math.max(40, ruleInner - ruleXW - ruleGap - collapseW - ruleGap);
+            EditBox groupPatEb =
+                    new EditBox(this.font, rx, y, groupPatW, rfh, Component.literal("cagpat" + gi));
+            groupPatEb.setMaxLength(2048);
+            groupPatEb.setValue(grp.getPatternSource());
+            groupPatEb.setHint(ChatUtilitiesScreenLayout.PATTERN_INPUT_HINT);
+            addRenderableWidget(groupPatEb);
+            rx += groupPatW + ruleGap;
+            addRenderableWidget(
+                    flatButtonDestructive(
+                            Component.literal("✕"),
+                            () -> {
+                                mgr.removeChatActionGroupAt(p, gix);
+                                init();
+                            },
+                            rx,
+                            y,
+                            ruleXW,
+                            rfh));
+            pendingChatGroupPatterns.add(new PendingChatGroupPattern(groupPatEb, p, gix));
+            rx += ruleXW + ruleGap;
+            addRenderableWidget(
+                    flatButton(
+                            Component.literal(collapsed ? "▸" : "▾"),
+                            () -> {
+                                if (collapsedChatActionGroups.contains(gix)) {
+                                    collapsedChatActionGroups.remove(gix);
+                                } else {
+                                    collapsedChatActionGroups.add(gix);
+                                }
+                                init();
+                            },
+                            rx,
+                            y,
+                            collapseW,
+                            rfh));
+            y += rfh + 10;
 
-            EditBox patEb = new EditBox(this.font, fx, y, rulePatW, 20, Component.literal("rpat" + idx));
-            patEb.setMaxLength(2048);
-            patEb.setValue(rule.getPatternSource());
-            patEb.setHint(ChatUtilitiesScreenLayout.PATTERN_INPUT_HINT);
-            addRenderableWidget(patEb);
+            if (collapsed) {
+                String preview = chatActionGroupPreview(grp);
+                final String previewFinal = preview;
+                addRenderableWidget(
+                        new AbstractWidget(fx, y, listRowFormW, 18, Component.empty()) {
+                            @Override
+                            protected void renderWidget(GuiGraphics g, int mx, int my, float pt) {
+                                int bg = this.isHovered() ? 0x28000000 : 0x18000000;
+                                g.fill(getX(), getY(), getX() + getWidth(), getY() + getHeight(), bg);
+                                g.drawString(
+                                        Minecraft.getInstance().font,
+                                        previewFinal,
+                                        getX() + 4,
+                                        getY() + (getHeight() - 8) / 2,
+                                        0xFFBBBBCC,
+                                        false);
+                            }
 
-            EditBox sndEb = new EditBox(this.font, fx + rulePatW + ruleGap, y, ruleSndW, 20, Component.literal("rsnd" + idx));
-            sndEb.setMaxLength(256);
-            sndEb.setValue(sndDisp);
-            sndEb.setHint(Component.literal("Sound id…"));
-            addRenderableWidget(sndEb);
+                            @Override
+                            public void updateWidgetNarration(NarrationElementOutput n) {
+                                defaultButtonNarrationText(n);
+                            }
+                        });
+                y += 18 + 16;
+                winChromeRects.add(
+                        new WinChromeRect(fx - 4, groupChromeTop - 4, fx + listRowFormW + 4, y + 4));
+                y += 10;
+                continue;
+            }
 
-            addRenderableWidget(flatButtonDestructive(Component.literal("✕"), () -> {
-                mgr.removeMessageSound(p, idx);
-                init();
-            }, fx + fW - ruleXW, y, ruleXW, 20));
+            List<ChatActionEffect> effects = grp.getEffects();
+            for (int ei = 0; ei < effects.size(); ei++) {
+                final int eix = ei;
+                ChatActionEffect eff = effects.get(ei);
+                rx = fx;
+                if (eff.getType() == ChatActionEffect.Type.IGNORE) {
+                        int ebX = rx;
+                        int ebY = y;
+                        addRenderableWidget(
+                                flatButton(
+                                        chatEffectTypeButtonCaption(eff.getType()),
+                                        () -> {
+                                            openChatActionTypeDropdown(p, gix, eix, ebX, ebY, typeBtnW);
+                                        },
+                                        rx,
+                                        y,
+                                        typeBtnW,
+                                        rfh));
+                    rx += typeBtnW + ruleGap;
+                    addRenderableWidget(
+                            flatButtonDestructive(
+                                    Component.literal("✕"),
+                                    () -> {
+                                        mgr.removeChatActionEffectAt(p, gix, eix);
+                                        init();
+                                    },
+                                    rx,
+                                    y,
+                                    ruleXW,
+                                    rfh));
+                } else if (eff.getType() == ChatActionEffect.Type.COLOR_HIGHLIGHT) {
+                        int ebX = rx;
+                        int ebY = y;
+                        addRenderableWidget(
+                                flatButton(
+                                        Component.literal("⚙ ").append(chatEffectTypeButtonCaption(eff.getType())),
+                                        () -> {
+                                            openChatActionTypeDropdown(p, gix, eix, ebX, ebY, typeBtnW);
+                                        },
+                                        rx,
+                                        y,
+                                        typeBtnW,
+                                        rfh));
+                    rx += typeBtnW + ruleGap;
+                    addRenderableWidget(
+                            chatHighlightPickColorRowWidget(
+                                    rx,
+                                    y,
+                                    CHAT_ACTION_HIGHLIGHT_PICK_W,
+                                    rfh,
+                                    eff.getHighlightColorRgb(),
+                                    () -> openChatHighlightColorPicker(p, gix, eix)));
+                    rx += CHAT_ACTION_HIGHLIGHT_PICK_W + ruleGap;
+                    addRenderableWidget(
+                            flatButtonDestructive(
+                                    Component.literal("✕"),
+                                    () -> {
+                                        mgr.removeChatActionEffectAt(p, gix, eix);
+                                        init();
+                                    },
+                                    rx,
+                                    y,
+                                    ruleXW,
+                                    rfh));
+                } else if (eff.getType() == ChatActionEffect.Type.TEXT_REPLACEMENT
+                        || eff.getType() == ChatActionEffect.Type.AUTO_RESPONSE) {
+                    int ruleTgtW = Math.min(220, Math.max(90, ruleInner - typeBtnW - ruleXW - ruleGap * 2));
+                    EditBox tgtEb =
+                            new EditBox(this.font, rx, y, ruleTgtW, rfh, Component.literal("catgt" + gi + "_" + ei));
+                    tgtEb.setMaxLength(2048);
+                    tgtEb.setValue(eff.getTargetText());
+                    tgtEb.setHint(
+                            Component.literal(
+                                    eff.getType() == ChatActionEffect.Type.AUTO_RESPONSE ? "Response text…" : "Replacement text…"));
+                    addRenderableWidget(tgtEb);
+                    rx += ruleTgtW + ruleGap;
 
-            pendingMessageSoundEdits.add(new PendingMessageSoundEdit(patEb, sndEb, p, idx));
-            y += 26;
+                    int ebX = rx;
+                    int ebY = y;
+                    addRenderableWidget(
+                            flatButton(
+                                    Component.literal("⚙ ").append(chatEffectTypeButtonCaption(eff.getType())),
+                                    () -> openChatActionTypeDropdown(p, gix, eix, ebX, ebY, typeBtnW),
+                                    rx,
+                                    y,
+                                    typeBtnW,
+                                    rfh));
+                    rx += typeBtnW + ruleGap;
+
+                    addRenderableWidget(
+                            flatButtonDestructive(
+                                    Component.literal("✕"),
+                                    () -> {
+                                        mgr.removeChatActionEffectAt(p, gix, eix);
+                                        init();
+                                    },
+                                    rx,
+                                    y,
+                                    ruleXW,
+                                    rfh));
+                    pendingChatEffectEdits.add(new PendingChatEffectEdit(null, tgtEb, p, gix, eix));
+                } else {
+                    int ruleSndW =
+                                Math.min(160, Math.max(72, (ruleInner - typeBtnW - ruleTestW - ruleGap * 3) / 2));
+                    Identifier sid = ChatUtilitiesManager.parseSoundId(eff.getSoundId()).orElse(null);
+                    String sndDisp = sid != null ? sid.toString() : eff.getSoundId();
+                    EditBox sndEb =
+                            new EditBox(this.font, rx, y, ruleSndW, rfh, Component.literal("caeff" + gi + "_" + ei));
+                    sndEb.setMaxLength(256);
+                    sndEb.setValue(sndDisp);
+                    sndEb.setHint(Component.literal("Sound id…"));
+                    addRenderableWidget(sndEb);
+                    rx += ruleSndW + ruleGap;
+
+                        int ebX = rx;
+                        int ebY = y;
+                    addRenderableWidget(
+                            flatButton(
+                                    Component.literal("⚙ ").append(chatEffectTypeButtonCaption(eff.getType())),
+                                    () -> {
+                                            openChatActionTypeDropdown(p, gix, eix, ebX, ebY, typeBtnW);
+                                    },
+                                    rx,
+                                    y,
+                                    typeBtnW,
+                                    rfh));
+                    rx += typeBtnW + ruleGap;
+
+                    addRenderableWidget(
+                            flatButton(
+                                    Component.literal("🔊 Test Sound"),
+                                    () -> ChatUtilitiesManager.parseSoundId(sndEb.getValue())
+                                            .filter(ChatUtilitiesManager::isRegisteredSound)
+                                            .ifPresent(ChatUtilitiesManager::playSoundPreview),
+                                    rx,
+                                    y,
+                                    ruleTestW,
+                                    rfh));
+                    rx += ruleTestW + ruleGap;
+
+                    addRenderableWidget(
+                            flatButtonDestructive(
+                                    Component.literal("✕"),
+                                    () -> {
+                                        mgr.removeChatActionEffectAt(p, gix, eix);
+                                        init();
+                                    },
+                                    rx,
+                                    y,
+                                    ruleXW,
+                                    rfh));
+
+                    pendingChatEffectEdits.add(new PendingChatEffectEdit(sndEb, null, p, gix, eix));
+                }
+                y += rfh + 14;
+            }
+
+            addRenderableWidget(
+                    flatButton(
+                            Component.literal("+ Add effect"),
+                            () -> {
+                                try {
+                                    mgr.addEffectToGroup(
+                                            p, gix, ChatActionEffect.Type.PLAY_SOUND, "");
+                                } catch (IllegalArgumentException ignored) {
+                                }
+                                init();
+                            },
+                            fx,
+                            y,
+                            Math.min(listRowFormW, 120),
+                            rfh));
+            y += rfh + 18;
+            winChromeRects.add(
+                    new WinChromeRect(fx - 4, groupChromeTop - 4, fx + listRowFormW + 4, y + 4));
+            y += 10;
         }
         if (rMax > 0) {
-            boolean up = ruleScroll > 0;
-            boolean down = ruleScroll < rMax;
+            boolean up = actionScroll > 0;
+            boolean down = actionScroll < rMax;
             if (up && down) {
-                int half = (fW - 4) / 2;
-                addRenderableWidget(flatButton(Component.literal("▲"),
-                        () -> { ruleScroll = Math.max(0, ruleScroll - 1); init(); },
-                        fx, y, half, 20));
-                addRenderableWidget(flatButton(Component.literal("▼"),
-                        () -> { ruleScroll = Math.min(rMax, ruleScroll + 1); init(); },
-                        fx + half + 4, y, half, 20));
+                int half = (listRowFormW - 4) / 2;
+                addRenderableWidget(
+                        flatButton(
+                                Component.literal("▲"),
+                                () -> {
+                                    actionScroll = Math.max(0, actionScroll - 1);
+                                    init();
+                                },
+                                fx,
+                                y,
+                                half,
+                                20));
+                addRenderableWidget(
+                        flatButton(
+                                Component.literal("▼"),
+                                () -> {
+                                    actionScroll = Math.min(rMax, actionScroll + 1);
+                                    init();
+                                },
+                                fx + half + 4,
+                                y,
+                                half,
+                                20));
             } else if (up) {
-                addRenderableWidget(flatButton(Component.literal("▲"),
-                        () -> { ruleScroll = Math.max(0, ruleScroll - 1); init(); },
-                        fx, y, fW, 20));
+                addRenderableWidget(
+                        flatButton(
+                                Component.literal("▲"),
+                                () -> {
+                                    actionScroll = Math.max(0, actionScroll - 1);
+                                    init();
+                                },
+                                fx,
+                                y,
+                                listRowFormW,
+                                20));
             } else {
-                addRenderableWidget(flatButton(Component.literal("▼"),
-                        () -> { ruleScroll = Math.min(rMax, ruleScroll + 1); init(); },
-                        fx, y, fW, 20));
+                addRenderableWidget(
+                        flatButton(
+                                Component.literal("▼"),
+                                () -> {
+                                    actionScroll = Math.min(rMax, actionScroll + 1);
+                                    init();
+                                },
+                                fx,
+                                y,
+                                listRowFormW,
+                                20));
+            }
+        }
+    }
+
+    private void buildCommandAliasesWidgets() {
+        ServerProfile p = profile();
+        if (p == null) {
+            return;
+        }
+        ChatUtilitiesManager mgr = ChatUtilitiesManager.get();
+        int fx = contentLeft();
+        int y = bodyY();
+        int g = 3;
+        int fh = CHAT_ACTION_FIELD_H;
+        int baseFormW = Math.min(CHAT_ACTIONS_FORM_CAP, contentW());
+        int addBtnW = 72;
+        int rmW = 24;
+        int fromW = 112;
+        int addToW = baseFormW - fromW - g - addBtnW - g;
+
+        commandAliasAddFromField = new EditBox(this.font, fx, y, fromW, fh, Component.literal("cafrom"));
+        commandAliasAddFromField.setMaxLength(64);
+        commandAliasAddFromField.setValue(displaySlashCommand(commandAliasNewFromDraft));
+        commandAliasAddFromField.setResponder(v -> commandAliasNewFromDraft = stripSlashCommand(v));
+        commandAliasAddFromField.setHint(Component.literal(I18n.get("chat-utilities.command_aliases.hint.from")));
+        addRenderableWidget(commandAliasAddFromField);
+
+        commandAliasAddToField =
+                new EditBox(this.font, fx + fromW + g, y, addToW, fh, Component.literal("cato"));
+        commandAliasAddToField.setMaxLength(64);
+        commandAliasAddToField.setValue(displaySlashCommand(commandAliasNewToDraft));
+        commandAliasAddToField.setResponder(v -> commandAliasNewToDraft = stripSlashCommand(v));
+        commandAliasAddToField.setHint(Component.literal(I18n.get("chat-utilities.command_aliases.hint.to")));
+        addRenderableWidget(commandAliasAddToField);
+
+        addRenderableWidget(
+                flatButtonPositive(
+                        Component.literal(I18n.get("chat-utilities.command_aliases.add")),
+                        () -> {
+                            if (mgr.addCommandAlias(
+                                    p,
+                                    stripSlashCommand(commandAliasAddFromField.getValue()),
+                                    stripSlashCommand(commandAliasAddToField.getValue()))) {
+                                commandAliasNewFromDraft = "";
+                                commandAliasNewToDraft = "";
+                            }
+                            init();
+                        },
+                        fx + fromW + g + addToW + g,
+                        y,
+                        addBtnW,
+                        fh));
+        y += fh + 8;
+
+        List<CommandAlias> aliases = p.getCommandAliases();
+        int rMax = Math.max(0, aliases.size() - COMMAND_ALIAS_PAGE);
+        aliasScroll = Math.min(aliasScroll, rMax);
+        int rowEnd = Math.min(aliasScroll + COMMAND_ALIAS_PAGE, aliases.size());
+        for (int i = aliasScroll; i < rowEnd; i++) {
+            final int idx = i;
+            CommandAlias ca = aliases.get(i);
+            int rowFromW = fromW;
+            int rowToW = baseFormW - rowFromW - g - rmW - g;
+            EditBox fromEb =
+                    new EditBox(this.font, fx, y, rowFromW, fh, Component.literal("caef" + i));
+            fromEb.setMaxLength(64);
+            fromEb.setValue(displaySlashCommand(ca.from()));
+            addRenderableWidget(fromEb);
+            EditBox toEb =
+                    new EditBox(this.font, fx + rowFromW + g, y, rowToW, fh, Component.literal("caet" + i));
+            toEb.setMaxLength(64);
+            toEb.setValue(displaySlashCommand(ca.to()));
+            addRenderableWidget(toEb);
+            pendingCommandAliasEdits.add(new PendingCommandAliasEdit(fromEb, toEb, p, idx));
+            addRenderableWidget(
+                    flatButtonDestructive(
+                            Component.literal("✕"),
+                            () -> {
+                                mgr.removeCommandAliasAt(p, idx);
+                                init();
+                            },
+                            fx + rowFromW + g + rowToW + g,
+                            y,
+                            rmW,
+                            fh));
+            y += fh + 4;
+        }
+
+        if (rMax > 0) {
+            boolean up = aliasScroll > 0;
+            boolean down = aliasScroll < rMax;
+            if (up && down) {
+                int half = (baseFormW - 4) / 2;
+                addRenderableWidget(
+                        flatButton(
+                                Component.literal("▲"),
+                                () -> {
+                                    aliasScroll = Math.max(0, aliasScroll - 1);
+                                    init();
+                                },
+                                fx,
+                                y,
+                                half,
+                                20));
+                addRenderableWidget(
+                        flatButton(
+                                Component.literal("▼"),
+                                () -> {
+                                    aliasScroll = Math.min(rMax, aliasScroll + 1);
+                                    init();
+                                },
+                                fx + half + 4,
+                                y,
+                                half,
+                                20));
+            } else if (up) {
+                addRenderableWidget(
+                        flatButton(
+                                Component.literal("▲"),
+                                () -> {
+                                    aliasScroll = Math.max(0, aliasScroll - 1);
+                                    init();
+                                },
+                                fx,
+                                y,
+                                baseFormW,
+                                20));
+            } else {
+                addRenderableWidget(
+                        flatButton(
+                                Component.literal("▼"),
+                                () -> {
+                                    aliasScroll = Math.min(rMax, aliasScroll + 1);
+                                    init();
+                                },
+                                fx,
+                                y,
+                                baseFormW,
+                                20));
             }
         }
     }
@@ -1346,13 +2896,16 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
     private void buildSettingsWidgets() {
         settingsContentScroll = Mth.clamp(settingsContentScroll, 0, settingsMaxContentScroll());
         int keyBtnW = 160;
-        int settingsRight =
-                contentRight() - (settingsMaxContentScroll() > 0 ? ThinScrollbar.W : 0);
+        int settingsRight = contentRight() - scrollbarReserve(settingsMaxContentScroll() > 0);
         int keyBtnX = settingsRight - keyBtnW;
 
         AbstractWidget openMenuKeyButton =
                 new AbstractWidget(
-                        keyBtnX, settingsScrolledY(settingsOpenMenuKeyRowY()), keyBtnW, 22, Component.literal(keybindCaptionOnly())) {
+                        keyBtnX,
+                        settingsScrolledY(settingsOpenMenuKeyRowY()),
+                        keyBtnW,
+                        22,
+                        Component.literal(keybindCaptionOnly(ChatUtilitiesModClient.OPEN_MENU_KEY, rebindingOpenMenuKey))) {
                     @Override
                     protected boolean isValidClickButton(MouseButtonInfo info) {
                         int b = info.button();
@@ -1366,6 +2919,8 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                             KeyMapping.resetMapping();
                             saveOptions();
                             rebindingOpenMenuKey = false;
+                            rebindingChatPeekKey = false;
+                            rebindingFullscreenImageClick = false;
                             rebindingCopyPlain = false;
                             rebindingCopyFormatted = false;
                             init();
@@ -1373,6 +2928,8 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                         }
                         rebindingCopyPlain = false;
                         rebindingCopyFormatted = false;
+                        rebindingFullscreenImageClick = false;
+                        rebindingChatPeekKey = false;
                         rebindingOpenMenuKey = true;
                         init();
                     }
@@ -1403,10 +2960,74 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                 Tooltip.create(Component.translatable("chat-utilities.settings.open_menu.tooltip")));
 
         addSettingsScrollClipWidget(openMenuKeyButton);
+
+        AbstractWidget chatPeekKeyButton =
+                new AbstractWidget(
+                        keyBtnX,
+                        settingsScrolledY(settingsChatPeekKeyRowY()),
+                        keyBtnW,
+                        22,
+                        Component.literal(keybindCaptionOnly(ChatUtilitiesModClient.CHAT_PEEK_KEY, rebindingChatPeekKey))) {
+                    @Override
+                    protected boolean isValidClickButton(MouseButtonInfo info) {
+                        int b = info.button();
+                        return b == 0 || b == 1;
+                    }
+
+                    @Override
+                    public void onClick(MouseButtonEvent event, boolean doubleClick) {
+                        if (event.button() == 1) {
+                            ChatUtilitiesModClient.CHAT_PEEK_KEY.setKey(InputConstants.UNKNOWN);
+                            KeyMapping.resetMapping();
+                            saveOptions();
+                            rebindingOpenMenuKey = false;
+                            rebindingChatPeekKey = false;
+                            rebindingFullscreenImageClick = false;
+                            rebindingCopyPlain = false;
+                            rebindingCopyFormatted = false;
+                            init();
+                            return;
+                        }
+                        rebindingCopyPlain = false;
+                        rebindingCopyFormatted = false;
+                        rebindingFullscreenImageClick = false;
+                        rebindingOpenMenuKey = false;
+                        rebindingChatPeekKey = true;
+                        init();
+                    }
+
+                    @Override
+                    protected void renderWidget(GuiGraphics g, int mx, int my, float pt) {
+                        boolean hov = this.isHovered();
+                        boolean act = this.active;
+                        int bg = !act ? 0x25000000 : hov ? 0x55FFFFFF : 0x35000000;
+                        int outline = !act ? 0x25FFFFFF : hov ? 0x70FFFFFF : 0x40FFFFFF;
+                        int tc = !act ? 0xFF555565 : hov ? 0xFFFFFFFF : 0xFFBBBBCC;
+                        g.fill(getX(), getY(), getX() + getWidth(), getY() + getHeight(), bg);
+                        g.renderOutline(getX(), getY(), getWidth(), getHeight(), outline);
+                        g.drawCenteredString(
+                                Minecraft.getInstance().font,
+                                keybindCaptionOnly(ChatUtilitiesModClient.CHAT_PEEK_KEY, rebindingChatPeekKey),
+                                getX() + getWidth() / 2,
+                                getY() + (getHeight() - 8) / 2,
+                                tc);
+                    }
+
+                    @Override
+                    public void updateWidgetNarration(NarrationElementOutput n) {
+                        defaultButtonNarrationText(n);
+                    }
+                };
+        chatPeekKeyButton.setTooltip(
+                Tooltip.create(Component.literal("Hold to temporarily show expanded chat (like T) without opening the input.")));
+        addSettingsScrollClipWidget(chatPeekKeyButton);
         addSettingsScrollClipWidget(
                 flatButtonCopyMouseBinding(keyBtnX, settingsScrolledY(settingsCopyPlainBindRowY()), keyBtnW, 22, true));
         addSettingsScrollClipWidget(
                 flatButtonCopyMouseBinding(keyBtnX, settingsScrolledY(settingsCopyFormattedBindRowY()), keyBtnW, 22, false));
+        addSettingsScrollClipWidget(
+                flatButtonFullscreenImageClickBinding(
+                        keyBtnX, settingsScrolledY(settingsFullscreenImageClickRowY()), keyBtnW, 22));
 
         addSettingsScrollClipWidget(flatButtonClickToCopy(keyBtnX, settingsScrolledY(settingsClickToCopyRowY()), keyBtnW, 22));
         addSettingsScrollClipWidget(
@@ -1424,16 +3045,73 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                 chatHistoryLimitSlider(keyBtnX, settingsScrolledY(settingsChatHistoryLimitRowY()), keyBtnW, 22));
 
         addSettingsScrollClipWidget(
+                flatButtonChatTimestamps(keyBtnX, settingsScrolledY(settingsTimestampShowRowY()), keyBtnW, 22));
+        addSettingsScrollClipWidget(
+                chatTimestampColorSettingButton(keyBtnX, settingsScrolledY(settingsTimestampColorRowY()), keyBtnW, 22));
+        int fmtGap = 4;
+        String fmtSample =
+                ChatTimestampFormatter.previewPlainForPattern(
+                        ChatUtilitiesClientOptions.getChatTimestampFormatPattern(),
+                        System.currentTimeMillis());
+        int tsPreviewW = Mth.clamp(this.font.width(fmtSample) + 8, 72, 120);
+        settingsTimestampPreviewSlotW = tsPreviewW;
+        int tsFieldX = keyBtnX;
+        int tsFieldW = keyBtnW;
+        settingsTimestampFormatField =
+                new EditBox(
+                        this.font,
+                        tsFieldX,
+                        settingsScrolledY(settingsTimestampFormatRowY()),
+                        tsFieldW,
+                        20,
+                        Component.literal("tsfmt"));
+        settingsTimestampFormatField.setMaxLength(96);
+        settingsTimestampFormatField.setValue(ChatUtilitiesClientOptions.getChatTimestampFormatPattern());
+        settingsTimestampFormatField.setResponder(ChatUtilitiesClientOptions::setChatTimestampFormatPattern);
+        settingsTimestampFormatField.setHint(
+                Component.translatable("chat-utilities.settings.chat_timestamp.format_hint"));
+        addSettingsScrollClipWidget(settingsTimestampFormatField);
+
+        addSettingsScrollClipWidget(
+                flatButtonChatSearchBar(keyBtnX, settingsScrolledY(settingsChatSearchEnabledRowY()), keyBtnW, 22));
+        addSettingsScrollClipWidget(
+                flatButtonChatSearchBarPosition(keyBtnX, settingsScrolledY(settingsChatSearchPositionRowY()), keyBtnW, 22));
+
+        addSettingsScrollClipWidget(
+                flatButtonImageChatPreviewEnabled(keyBtnX, settingsScrolledY(settingsImagePreviewEnabledRowY()), keyBtnW, 22));
+        addSettingsScrollClipWidget(
+                flatButtonImagePreviewWhitelist(keyBtnX, settingsScrolledY(settingsImagePreviewWhitelistRowY()), keyBtnW, 22));
+        addSettingsScrollClipWidget(
+                flatButtonAllowUntrustedDomains(
+                        keyBtnX, settingsScrolledY(settingsImagePreviewAllowUntrustedDomainsRowY()), keyBtnW, 22));
+        addSettingsScrollClipWidget(
                 flatButtonSymbolSelector(keyBtnX, settingsScrolledY(settingsChatSymbolSelectorRowY()), keyBtnW, 22));
         addSettingsScrollClipWidget(
                 flatButtonSymbolPaletteInsertStyle(
                         keyBtnX, settingsScrolledY(settingsSymbolPaletteInsertStyleRowY()), keyBtnW, 22));
 
+        addSettingsScrollClipWidget(
+                chatPanelBackgroundOpacitySlider(keyBtnX, settingsScrolledY(settingsChatPanelBackgroundRowY()), keyBtnW, 22));
+        addSettingsScrollClipWidget(
+                chatPanelBackgroundFocusedOpacitySlider(
+                        keyBtnX, settingsScrolledY(settingsChatPanelBackgroundFocusedRowY()), keyBtnW, 22));
+        addSettingsScrollClipWidget(
+                chatBarBackgroundOpacitySlider(
+                        keyBtnX, settingsScrolledY(settingsChatBarBackgroundRowY()), keyBtnW, 22));
         addSettingsScrollClipWidget(flatButtonChatTextShadow(keyBtnX, settingsScrolledY(settingsShadowRowY()), keyBtnW, 22));
         addSettingsScrollClipWidget(
                 flatButtonStackRepeatedMessages(keyBtnX, settingsScrolledY(settingsStackRepeatedMessagesRowY()), keyBtnW, 22));
         addSettingsScrollClipWidget(
                 flatButtonChatBarMenuButton(keyBtnX, settingsScrolledY(settingsChatBarMenuButtonRowY()), keyBtnW, 22));
+        addSettingsScrollClipWidget(
+                modPrimaryColorSettingButton(keyBtnX, settingsScrolledY(settingsModPrimaryColorRowY()), keyBtnW, 22));
+        addSettingsScrollClipWidget(
+                flatButtonTabUnreadBadges(keyBtnX, settingsScrolledY(settingsTabUnreadBadgesRowY()), keyBtnW, 22));
+        addSettingsScrollClipWidget(
+                flatButtonAlwaysShowUnreadTabs(keyBtnX, settingsScrolledY(settingsAlwaysShowUnreadTabsRowY()), keyBtnW, 22));
+        addSettingsScrollClipWidget(
+                flatButtonIgnoreSelfChatActions(
+                        keyBtnX, settingsScrolledY(settingsIgnoreSelfChatActionsRowY()), keyBtnW, 22));
 
         int profY = settingsScrolledY(settingsProfilesFormY());
         int gap = 8;
@@ -1442,7 +3120,11 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         AbstractWidget importBtn =
                 flatButton(
                         Component.literal("⬆ Import Profiles"),
-                        () -> runImportProfilesDialog(),
+                        () -> {
+                            importExportChoiceDialogOpen = true;
+                            importExportChoiceIsImport = true;
+                            init();
+                        },
                         leftX,
                         profY,
                         btnW,
@@ -1453,7 +3135,11 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         AbstractWidget exportBtn =
                 flatButton(
                         Component.literal("⬇ Export Profiles"),
-                        () -> runExportProfilesDialog(),
+                        () -> {
+                            importExportChoiceDialogOpen = true;
+                            importExportChoiceIsImport = false;
+                            init();
+                        },
                         leftX + btnW + gap,
                         profY,
                         btnW,
@@ -1462,15 +3148,34 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                 Tooltip.create(Component.translatable("chat-utilities.settings.export_profiles.tooltip")));
         addSettingsScrollClipWidget(exportBtn);
 
+        AbstractWidget labyBtn =
+                flatButton(
+                        Component.literal("⬆ Import from LabyMod"),
+                        () -> runImportLabyModProfilesDialog(),
+                        leftX,
+                        profY + 28,
+                        btnW * 2 + gap,
+                        20);
+        labyBtn.setTooltip(Tooltip.create(Component.literal("Import a LabyMod chat windows JSON export.")));
+        addSettingsScrollClipWidget(labyBtn);
+
+        if (importExportChoiceDialogOpen) {
+            buildImportExportChoiceDialog();
+        }
+
         long nowReset = System.currentTimeMillis();
         boolean resetArmed = resetDefaultsConfirmDeadlineMs > nowReset;
         int resetW = 200;
+        Component resetLabel =
+                Component.literal("↺ ")
+                        .append(
+                                Component.translatable(
+                                        resetArmed
+                                                ? "chat-utilities.settings.reset_all.confirm"
+                                                : "chat-utilities.settings.reset_all"));
         AbstractWidget resetAllBtn =
                 flatButtonDestructive(
-                        Component.translatable(
-                                resetArmed
-                                        ? "chat-utilities.settings.reset_all.confirm"
-                                        : "chat-utilities.settings.reset_all"),
+                        resetLabel,
                         () -> {
                             long t = System.currentTimeMillis();
                             if (resetDefaultsConfirmDeadlineMs > t) {
@@ -1502,6 +3207,122 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                 Tooltip.create(Component.translatable("chat-utilities.settings.reset_all.tooltip")));
         addRenderableWidget(resetAllBtn);
         settingsNonClipRenderables.add(resetAllBtn);
+    }
+
+    private AbstractWidget flatButtonImageChatPreviewEnabled(int x, int y, int w, int h) {
+        AbstractWidget btn =
+                new AbstractWidget(x, y, w, h, Component.empty()) {
+                    @Override
+                    public void onClick(MouseButtonEvent event, boolean dbl) {
+                        ChatUtilitiesClientOptions.toggleImageChatPreviewEnabled();
+                        init();
+                    }
+
+                    @Override
+                    protected void renderWidget(GuiGraphics g, int mx, int my, float pt) {
+                        boolean on = ChatUtilitiesClientOptions.isImageChatPreviewEnabled();
+                        boolean hov = this.isHovered();
+                        boolean act = this.active;
+                        int bg = !act ? 0x25000000 : hov ? 0x55FFFFFF : 0x35000000;
+                        int outline = !act ? 0x25FFFFFF : hov ? 0x70FFFFFF : 0x40FFFFFF;
+                        g.fill(getX(), getY(), getX() + getWidth(), getY() + getHeight(), bg);
+                        g.renderOutline(getX(), getY(), getWidth(), getHeight(), outline);
+                        Component cap = Component.literal(on ? "Enabled" : "Disabled");
+                        int tc = on ? 0xFF55FF55 : 0xFFFF5555;
+                        g.drawCenteredString(
+                                Minecraft.getInstance().font,
+                                cap,
+                                getX() + getWidth() / 2,
+                                getY() + (getHeight() - 8) / 2,
+                                tc);
+                    }
+
+                    @Override
+                    public void updateWidgetNarration(NarrationElementOutput n) {
+                        defaultButtonNarrationText(n);
+                    }
+                };
+        btn.setTooltip(
+                Tooltip.create(Component.translatable("chat-utilities.settings.image_preview.enabled.tooltip")));
+        return btn;
+    }
+
+    private AbstractWidget flatButtonImagePreviewWhitelist(int x, int y, int w, int h) {
+        AbstractWidget btn =
+                new AbstractWidget(x, y, w, h, Component.empty()) {
+                    @Override
+                    public void onClick(MouseButtonEvent event, boolean dbl) {
+                        ChatUtilitiesRootScreen.this.imageWhitelistOverlay =
+                                new ImagePreviewWhitelistOverlay(
+                                        () -> {
+                                            ChatUtilitiesRootScreen.this.imageWhitelistOverlay = null;
+                                            ChatUtilitiesRootScreen.this.init();
+                                        });
+                        init();
+                    }
+
+                    @Override
+                    protected void renderWidget(GuiGraphics g, int mx, int my, float pt) {
+                        boolean hov = this.isHovered();
+                        boolean act = this.active;
+                        int bg = !act ? 0x25000000 : hov ? 0x55FFFFFF : 0x35000000;
+                        int outline = !act ? 0x25FFFFFF : hov ? 0x70FFFFFF : 0x40FFFFFF;
+                        g.fill(getX(), getY(), getX() + getWidth(), getY() + getHeight(), bg);
+                        g.renderOutline(getX(), getY(), getWidth(), getHeight(), outline);
+                        g.drawCenteredString(
+                                Minecraft.getInstance().font,
+                                Component.translatable("chat-utilities.settings.image_preview.whitelist_open"),
+                                getX() + getWidth() / 2,
+                                getY() + (getHeight() - 8) / 2,
+                                0xFFBBBBCC);
+                    }
+
+                    @Override
+                    public void updateWidgetNarration(NarrationElementOutput n) {
+                        defaultButtonNarrationText(n);
+                    }
+                };
+        btn.setTooltip(
+                Tooltip.create(Component.translatable("chat-utilities.settings.image_preview.whitelist.tooltip")));
+        return btn;
+    }
+
+    private AbstractWidget flatButtonAllowUntrustedDomains(int x, int y, int w, int h) {
+        AbstractWidget btn =
+                new AbstractWidget(x, y, w, h, Component.empty()) {
+                    @Override
+                    public void onClick(MouseButtonEvent event, boolean dbl) {
+                        ChatUtilitiesClientOptions.toggleAllowUntrustedImagePreviewDomains();
+                        init();
+                    }
+
+                    @Override
+                    protected void renderWidget(GuiGraphics g, int mx, int my, float pt) {
+                        boolean hov = this.isHovered();
+                        boolean act = this.active;
+                        boolean on = ChatUtilitiesClientOptions.isAllowUntrustedImagePreviewDomains();
+                        int bg = !act ? 0x25000000 : hov ? 0x55FFFFFF : 0x35000000;
+                        int outline = !act ? 0x25FFFFFF : hov ? 0x70FFFFFF : 0x40FFFFFF;
+                        g.fill(getX(), getY(), getX() + getWidth(), getY() + getHeight(), bg);
+                        g.renderOutline(getX(), getY(), getWidth(), getHeight(), outline);
+                        Component cap = Component.literal(on ? "Enabled" : "Disabled");
+                        int tc = on ? 0xFF55FF55 : 0xFFFF5555;
+                        g.drawCenteredString(
+                                Minecraft.getInstance().font,
+                                cap,
+                                getX() + getWidth() / 2,
+                                getY() + (getHeight() - 8) / 2,
+                                tc);
+                    }
+
+                    @Override
+                    public void updateWidgetNarration(NarrationElementOutput n) {
+                        defaultButtonNarrationText(n);
+                    }
+                };
+        btn.setTooltip(
+                Tooltip.create(Component.translatable("chat-utilities.settings.image_preview.allow_untrusted_domains.tooltip")));
+        return btn;
     }
 
     private AbstractWidget flatButtonSymbolSelector(int x, int y, int w, int h) {
@@ -1732,6 +3553,50 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         return Mth.clamp(snapped, min, max);
     }
 
+    /** Flat panel; label in upper area, thin track + thumb along the bottom (no line through the text). */
+    private static void renderFlatSliderWidget(
+            GuiGraphics g, AbstractSliderButton slider, int mx, int my, float pt, double value01) {
+        boolean hov = slider.isHovered();
+        boolean act = slider.active;
+        int bg = !act ? 0x25000000 : hov ? 0x55FFFFFF : 0x35000000;
+        int outline = !act ? 0x25FFFFFF : hov ? 0x70FFFFFF : 0x40FFFFFF;
+        int tc = !act ? 0xFF555565 : hov ? 0xFFFFFFFF : 0xFFBBBBCC;
+        int x = slider.getX();
+        int y = slider.getY();
+        int w = slider.getWidth();
+        int h = slider.getHeight();
+        g.fill(x, y, x + w, y + h, bg);
+        g.renderOutline(x, y, w, h, outline);
+
+        int pad = 5;
+        int innerL = x + pad;
+        int innerR = x + w - pad;
+        int innerW = Math.max(0, innerR - innerL);
+        double v = Mth.clamp(value01, 0.0, 1.0);
+
+        int trackH = 2;
+        int trackBottom = y + h - 4;
+        int trackTop = trackBottom - trackH;
+        g.fill(innerL, trackTop, innerR, trackBottom, 0x40000000);
+        int fillW = (int) Math.round(innerW * v);
+        if (fillW > 0) {
+            g.fill(innerL, trackTop, innerL + fillW, trackBottom, act ? 0x90BBBBCC : 0x50555665);
+        }
+        int thumbW = 3;
+        int tx = innerL + (int) Math.round((innerW - thumbW) * v);
+        int thumbTop = trackTop - 1;
+        int thumbBot = trackBottom + 1;
+        g.fill(tx, thumbTop, tx + thumbW, thumbBot, act ? 0xFFDDDDEE : 0xFF666678);
+
+        int textY = y + Math.max(2, trackTop - y - 10);
+        g.drawCenteredString(
+                Minecraft.getInstance().font,
+                slider.getMessage(),
+                x + w / 2,
+                textY,
+                tc);
+    }
+
     private AbstractWidget smoothChatFadeMsSlider(int x, int y, int w, int h) {
         int min = ChatUtilitiesClientOptions.SMOOTH_CHAT_FADE_MS_MIN;
         int max = ChatUtilitiesClientOptions.SMOOTH_CHAT_FADE_MS_MAX;
@@ -1759,6 +3624,27 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                         value = (snapped - min) / (double) (max - min);
                         ChatUtilitiesClientOptions.setSmoothChatFadeMs(snapped);
                         updateMessage();
+                    }
+
+                    @Override
+                    public void renderWidget(GuiGraphics g, int mx, int my, float pt) {
+                        renderFlatSliderWidget(g, this, mx, my, pt, value);
+                    }
+
+                    @Override
+                    public boolean mouseScrolled(
+                            double mouseX, double mouseY, double horizontalAmount, double verticalAmount) {
+                        if (!active || !isMouseOver(mouseX, mouseY) || verticalAmount == 0) {
+                            return super.mouseScrolled(mouseX, mouseY, horizontalAmount, verticalAmount);
+                        }
+                        int step = verticalAmount > 0 ? -50 : 50;
+                        int next =
+                                snapSmoothChatSliderMs(
+                                        Mth.clamp(msFromSlider() + step, min, max));
+                        value = (next - min) / (double) (max - min);
+                        ChatUtilitiesClientOptions.setSmoothChatFadeMs(next);
+                        updateMessage();
+                        return true;
                     }
                 };
         slider.setTooltip(
@@ -1794,6 +3680,27 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                         value = (snapped - min) / (double) (max - min);
                         ChatUtilitiesClientOptions.setSmoothChatBarOpenMs(snapped);
                         updateMessage();
+                    }
+
+                    @Override
+                    public void renderWidget(GuiGraphics g, int mx, int my, float pt) {
+                        renderFlatSliderWidget(g, this, mx, my, pt, value);
+                    }
+
+                    @Override
+                    public boolean mouseScrolled(
+                            double mouseX, double mouseY, double horizontalAmount, double verticalAmount) {
+                        if (!active || !isMouseOver(mouseX, mouseY) || verticalAmount == 0) {
+                            return super.mouseScrolled(mouseX, mouseY, horizontalAmount, verticalAmount);
+                        }
+                        int step = verticalAmount > 0 ? -50 : 50;
+                        int next =
+                                snapSmoothChatSliderMs(
+                                        Mth.clamp(msFromSlider() + step, min, max));
+                        value = (next - min) / (double) (max - min);
+                        ChatUtilitiesClientOptions.setSmoothChatBarOpenMs(next);
+                        updateMessage();
+                        return true;
                     }
                 };
         slider.setTooltip(
@@ -1924,6 +3831,196 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         return btn;
     }
 
+    private AbstractWidget flatButtonTabUnreadBadges(int x, int y, int w, int h) {
+        AbstractWidget btn =
+                new AbstractWidget(x, y, w, h, Component.empty()) {
+                    @Override
+                    public void onClick(MouseButtonEvent event, boolean dbl) {
+                        ChatUtilitiesClientOptions.toggleChatWindowTabUnreadBadgesEnabled();
+                        init();
+                    }
+
+                    @Override
+                    protected void renderWidget(GuiGraphics g, int mx, int my, float pt) {
+                        boolean on = ChatUtilitiesClientOptions.isChatWindowTabUnreadBadgesEnabled();
+                        boolean hov = this.isHovered();
+                        boolean act = this.active;
+                        int bg = !act ? 0x25000000 : hov ? 0x55FFFFFF : 0x35000000;
+                        int outline = !act ? 0x25FFFFFF : hov ? 0x70FFFFFF : 0x40FFFFFF;
+                        g.fill(getX(), getY(), getX() + getWidth(), getY() + getHeight(), bg);
+                        g.renderOutline(getX(), getY(), getWidth(), getHeight(), outline);
+                        Component cap = Component.literal(on ? "Enabled" : "Disabled");
+                        int tc = on ? 0xFF55FF55 : 0xFFFF5555;
+                        g.drawCenteredString(
+                                Minecraft.getInstance().font,
+                                cap,
+                                getX() + getWidth() / 2,
+                                getY() + (getHeight() - 8) / 2,
+                                tc);
+                    }
+
+                    @Override
+                    public void updateWidgetNarration(NarrationElementOutput n) {
+                        defaultButtonNarrationText(n);
+                    }
+                };
+        btn.setTooltip(Tooltip.create(Component.translatable("chat-utilities.settings.tab_unread_badges.tooltip")));
+        return btn;
+    }
+
+    private AbstractWidget flatButtonAlwaysShowUnreadTabs(int x, int y, int w, int h) {
+        AbstractWidget btn =
+                new AbstractWidget(x, y, w, h, Component.empty()) {
+                    @Override
+                    public void onClick(MouseButtonEvent event, boolean dbl) {
+                        ChatUtilitiesClientOptions.toggleAlwaysShowUnreadTabs();
+                        init();
+                    }
+
+                    @Override
+                    protected void renderWidget(GuiGraphics g, int mx, int my, float pt) {
+                        boolean on = ChatUtilitiesClientOptions.isAlwaysShowUnreadTabs();
+                        boolean hov = this.isHovered();
+                        boolean act = this.active;
+                        int bg = !act ? 0x25000000 : hov ? 0x55FFFFFF : 0x35000000;
+                        int outline = !act ? 0x25FFFFFF : hov ? 0x70FFFFFF : 0x40FFFFFF;
+                        g.fill(getX(), getY(), getX() + getWidth(), getY() + getHeight(), bg);
+                        g.renderOutline(getX(), getY(), getWidth(), getHeight(), outline);
+                        Component cap = Component.literal(on ? "Enabled" : "Disabled");
+                        int tc = on ? 0xFF55FF55 : 0xFFFF5555;
+                        g.drawCenteredString(
+                                Minecraft.getInstance().font,
+                                cap,
+                                getX() + getWidth() / 2,
+                                getY() + (getHeight() - 8) / 2,
+                                tc);
+                    }
+
+                    @Override
+                    public void updateWidgetNarration(NarrationElementOutput n) {
+                        defaultButtonNarrationText(n);
+                    }
+                };
+        btn.setTooltip(Tooltip.create(Component.literal("Show unread tabs on HUD when chat is closed.")));
+        return btn;
+    }
+
+    private AbstractWidget flatButtonIgnoreSelfChatActions(int x, int y, int w, int h) {
+        AbstractWidget btn =
+                new AbstractWidget(x, y, w, h, Component.empty()) {
+                    @Override
+                    public void onClick(MouseButtonEvent event, boolean dbl) {
+                        ChatUtilitiesClientOptions.toggleIgnoreSelfInChatActions();
+                        init();
+                    }
+
+                    @Override
+                    protected void renderWidget(GuiGraphics g, int mx, int my, float pt) {
+                        boolean on = ChatUtilitiesClientOptions.isIgnoreSelfInChatActions();
+                        boolean hov = this.isHovered();
+                        boolean act = this.active;
+                        int bg = !act ? 0x25000000 : hov ? 0x55FFFFFF : 0x35000000;
+                        int outline = !act ? 0x25FFFFFF : hov ? 0x70FFFFFF : 0x40FFFFFF;
+                        g.fill(getX(), getY(), getX() + getWidth(), getY() + getHeight(), bg);
+                        g.renderOutline(getX(), getY(), getWidth(), getHeight(), outline);
+                        Component cap = Component.literal(on ? "Enabled" : "Disabled");
+                        int tc = on ? 0xFF55FF55 : 0xFFFF5555;
+                        g.drawCenteredString(
+                                Minecraft.getInstance().font,
+                                cap,
+                                getX() + getWidth() / 2,
+                                getY() + (getHeight() - 8) / 2,
+                                tc);
+                    }
+
+                    @Override
+                    public void updateWidgetNarration(NarrationElementOutput n) {
+                        defaultButtonNarrationText(n);
+                    }
+                };
+        btn.setTooltip(
+                Tooltip.create(Component.translatable("chat-utilities.settings.ignore_self_chat_actions.tooltip")));
+        return btn;
+    }
+
+    private AbstractWidget flatButtonChatSearchBar(int x, int y, int w, int h) {
+        AbstractWidget btn =
+                new AbstractWidget(x, y, w, h, Component.empty()) {
+                    @Override
+                    public void onClick(MouseButtonEvent event, boolean dbl) {
+                        ChatUtilitiesClientOptions.toggleChatSearchBarEnabled();
+                        init();
+                    }
+
+                    @Override
+                    protected void renderWidget(GuiGraphics g, int mx, int my, float pt) {
+                        boolean on = ChatUtilitiesClientOptions.isChatSearchBarEnabled();
+                        boolean hov = this.isHovered();
+                        boolean act = this.active;
+                        int bg = !act ? 0x25000000 : hov ? 0x55FFFFFF : 0x35000000;
+                        int outline = !act ? 0x25FFFFFF : hov ? 0x70FFFFFF : 0x40FFFFFF;
+                        g.fill(getX(), getY(), getX() + getWidth(), getY() + getHeight(), bg);
+                        g.renderOutline(getX(), getY(), getWidth(), getHeight(), outline);
+                        Component cap = Component.literal(on ? "Enabled" : "Disabled");
+                        int tc = on ? 0xFF55FF55 : 0xFFFF5555;
+                        g.drawCenteredString(
+                                Minecraft.getInstance().font,
+                                cap,
+                                getX() + getWidth() / 2,
+                                getY() + (getHeight() - 8) / 2,
+                                tc);
+                    }
+
+                    @Override
+                    public void updateWidgetNarration(NarrationElementOutput n) {
+                        defaultButtonNarrationText(n);
+                    }
+                };
+        btn.setTooltip(
+                Tooltip.create(Component.translatable("chat-utilities.settings.chat_search_bar.tooltip")));
+        return btn;
+    }
+
+    private AbstractWidget flatButtonChatSearchBarPosition(int x, int y, int w, int h) {
+        AbstractWidget btn =
+                new AbstractWidget(x, y, w, h, Component.empty()) {
+                    @Override
+                    public void onClick(MouseButtonEvent event, boolean dbl) {
+                        ChatUtilitiesClientOptions.cycleChatSearchBarPosition();
+                        init();
+                    }
+
+                    @Override
+                    protected void renderWidget(GuiGraphics g, int mx, int my, float pt) {
+                        boolean hov = this.isHovered();
+                        boolean act = this.active;
+                        int bg = !act ? 0x25000000 : hov ? 0x55FFFFFF : 0x35000000;
+                        int outline = !act ? 0x25FFFFFF : hov ? 0x70FFFFFF : 0x40FFFFFF;
+                        g.fill(getX(), getY(), getX() + getWidth(), getY() + getHeight(), bg);
+                        g.renderOutline(getX(), getY(), getWidth(), getHeight(), outline);
+                        var pos = ChatUtilitiesClientOptions.getChatSearchBarPosition();
+                        Component cap =
+                                Component.translatable(
+                                        "chat-utilities.settings.chat_search_bar_position."
+                                                + pos.name().toLowerCase());
+                        g.drawCenteredString(
+                                Minecraft.getInstance().font,
+                                cap,
+                                getX() + getWidth() / 2,
+                                getY() + (getHeight() - 8) / 2,
+                                0xFFE8EEF8);
+                    }
+
+                    @Override
+                    public void updateWidgetNarration(NarrationElementOutput n) {
+                        defaultButtonNarrationText(n);
+                    }
+                };
+        btn.setTooltip(
+                Tooltip.create(Component.translatable("chat-utilities.settings.chat_search_bar_position.tooltip")));
+        return btn;
+    }
+
     private AbstractWidget chatHistoryLimitSlider(int x, int y, int w, int h) {
         int min = ChatUtilitiesClientOptions.CHAT_HISTORY_LIMIT_MIN;
         int max = ChatUtilitiesClientOptions.CHAT_HISTORY_LIMIT_MAX;
@@ -1952,11 +4049,247 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                         ChatUtilitiesClientOptions.setChatHistoryLimitLines(snapped);
                         updateMessage();
                     }
+
+                    @Override
+                    public void renderWidget(GuiGraphics g, int mx, int my, float pt) {
+                        renderFlatSliderWidget(g, this, mx, my, pt, value);
+                    }
+
+                    @Override
+                    public boolean mouseScrolled(
+                            double mouseX, double mouseY, double horizontalAmount, double verticalAmount) {
+                        if (!active || !isMouseOver(mouseX, mouseY) || verticalAmount == 0) {
+                            return super.mouseScrolled(mouseX, mouseY, horizontalAmount, verticalAmount);
+                        }
+                        int step = ChatUtilitiesClientOptions.CHAT_HISTORY_LIMIT_STEP;
+                        if (verticalAmount > 0) {
+                            step = -step;
+                        }
+                        int next = snapChatHistoryLimitLines(linesFromSlider() + step);
+                        value = (next - min) / (double) (max - min);
+                        ChatUtilitiesClientOptions.setChatHistoryLimitLines(next);
+                        updateMessage();
+                        return true;
+                    }
                 };
         slider.setTooltip(
                 Tooltip.create(Component.translatable("chat-utilities.settings.chat_history_limit.tooltip")));
         slider.active = ChatUtilitiesClientOptions.isLongerChatHistory();
         return slider;
+    }
+
+    private AbstractWidget chatPanelBackgroundOpacitySlider(int x, int y, int w, int h) {
+        return chatOpacitySlider(
+                x,
+                y,
+                w,
+                h,
+                () -> ChatUtilitiesClientOptions.getChatPanelBackgroundOpacityUnfocusedPercent(),
+                ChatUtilitiesClientOptions::setChatPanelBackgroundOpacityUnfocusedPercent,
+                "chat-utilities.settings.chat_panel_background_opacity.unfocused.value",
+                "chat-utilities.settings.chat_panel_background_opacity.unfocused.tooltip");
+    }
+
+    private AbstractWidget chatPanelBackgroundFocusedOpacitySlider(int x, int y, int w, int h) {
+        return chatOpacitySlider(
+                x,
+                y,
+                w,
+                h,
+                () -> ChatUtilitiesClientOptions.getChatPanelBackgroundOpacityFocusedPercent(),
+                ChatUtilitiesClientOptions::setChatPanelBackgroundOpacityFocusedPercent,
+                "chat-utilities.settings.chat_panel_background_opacity.focused.value",
+                "chat-utilities.settings.chat_panel_background_opacity.focused.tooltip");
+    }
+
+    private AbstractWidget chatBarBackgroundOpacitySlider(int x, int y, int w, int h) {
+        return chatOpacitySlider(
+                x,
+                y,
+                w,
+                h,
+                () -> ChatUtilitiesClientOptions.getChatBarBackgroundOpacityPercent(),
+                ChatUtilitiesClientOptions::setChatBarBackgroundOpacityPercent,
+                "chat-utilities.settings.chat_bar_background_opacity.value",
+                "chat-utilities.settings.chat_bar_background_opacity.tooltip");
+    }
+
+    private AbstractWidget chatOpacitySlider(
+            int x,
+            int y,
+            int w,
+            int h,
+            java.util.function.IntSupplier current,
+            java.util.function.IntConsumer setter,
+            String valueLangKey,
+            String tooltipLangKey) {
+        int min = ChatUtilitiesClientOptions.CHAT_PANEL_BG_OPACITY_MIN;
+        int max = ChatUtilitiesClientOptions.CHAT_PANEL_BG_OPACITY_MAX;
+        int cur = current.getAsInt();
+        double initial = (cur - min) / (double) (max - min);
+        AbstractSliderButton slider =
+                new AbstractSliderButton(x, y, w, h, Component.empty(), initial) {
+                    {
+                        updateMessage();
+                    }
+
+                    @Override
+                    protected void updateMessage() {
+                        int p = Mth.clamp((int) Math.round(Mth.lerp(value, min, max)), min, max);
+                        setMessage(Component.translatable(valueLangKey, p));
+                    }
+
+                    @Override
+                    protected void applyValue() {
+                        int snapped = Mth.clamp((int) Math.round(Mth.lerp(value, min, max)), min, max);
+                        value = (snapped - min) / (double) (max - min);
+                        setter.accept(snapped);
+                        updateMessage();
+                    }
+
+                    @Override
+                    public void renderWidget(GuiGraphics g, int mx, int my, float pt) {
+                        renderFlatSliderWidget(g, this, mx, my, pt, value);
+                    }
+
+                    @Override
+                    public boolean mouseScrolled(
+                            double mouseX, double mouseY, double horizontalAmount, double verticalAmount) {
+                        if (!active || !isMouseOver(mouseX, mouseY) || verticalAmount == 0) {
+                            return super.mouseScrolled(mouseX, mouseY, horizontalAmount, verticalAmount);
+                        }
+                        int step = verticalAmount > 0 ? -5 : 5;
+                        int next =
+                                Mth.clamp(
+                                        (int) Math.round(Mth.lerp(value, min, max)) + step, min, max);
+                        value = (next - min) / (double) (max - min);
+                        setter.accept(next);
+                        updateMessage();
+                        return true;
+                    }
+                };
+        slider.setTooltip(Tooltip.create(Component.translatable(tooltipLangKey)));
+        return slider;
+    }
+
+    private AbstractWidget modPrimaryColorSettingButton(int x, int y, int w, int h) {
+        AbstractWidget b =
+                new AbstractWidget(x, y, w, h, Component.empty()) {
+                    @Override
+                    public void onClick(MouseButtonEvent event, boolean dbl) {
+                        ChatUtilitiesRootScreen.this.clearPendingChatHighlightPickState();
+                        ChatUtilitiesRootScreen.this.modColorPickerOverlay = ModPrimaryColorPickerOverlay.create();
+                    }
+
+                    @Override
+                    protected void renderWidget(GuiGraphics g, int mx, int my, float pt) {
+                        boolean hov = this.isHovered();
+                        boolean act = this.active;
+                        int bg = !act ? 0x25000000 : hov ? 0x55FFFFFF : 0x35000000;
+                        int outline = !act ? 0x25FFFFFF : hov ? 0x70FFFFFF : 0x40FFFFFF;
+                        g.fill(getX(), getY(), getX() + getWidth(), getY() + getHeight(), bg);
+                        g.renderOutline(getX(), getY(), getWidth(), getHeight(), outline);
+                        int sw = ModAccentAnimator.currentArgb();
+                        int sx = getX() + 6;
+                        int sy = getY() + (getHeight() - 14) / 2;
+                        g.fill(sx, sy, sx + 14, sy + 14, sw);
+                        g.renderOutline(sx, sy, 14, 14, 0xFFAAAAAA);
+                        String cap = I18n.get("chat-utilities.settings.mod_primary_color.change");
+                        g.drawString(
+                                Minecraft.getInstance().font,
+                                cap,
+                                sx + 18,
+                                getY() + (getHeight() - 8) / 2,
+                                0xFFBBBBCC,
+                                false);
+                    }
+
+                    @Override
+                    public void updateWidgetNarration(NarrationElementOutput n) {
+                        defaultButtonNarrationText(n);
+                    }
+                };
+        b.setTooltip(Tooltip.create(Component.translatable("chat-utilities.settings.mod_primary_color.tooltip")));
+        return b;
+    }
+
+    private AbstractWidget flatButtonChatTimestamps(int x, int y, int w, int h) {
+        AbstractWidget btn =
+                new AbstractWidget(x, y, w, h, Component.empty()) {
+                    @Override
+                    public void onClick(MouseButtonEvent event, boolean dbl) {
+                        ChatUtilitiesClientOptions.toggleChatTimestampsEnabled();
+                        init();
+                    }
+
+                    @Override
+                    protected void renderWidget(GuiGraphics g, int mx, int my, float pt) {
+                        boolean on = ChatUtilitiesClientOptions.isChatTimestampsEnabled();
+                        boolean hov = this.isHovered();
+                        boolean act = this.active;
+                        int bg = !act ? 0x25000000 : hov ? 0x55FFFFFF : 0x35000000;
+                        int outline = !act ? 0x25FFFFFF : hov ? 0x70FFFFFF : 0x40FFFFFF;
+                        g.fill(getX(), getY(), getX() + getWidth(), getY() + getHeight(), bg);
+                        g.renderOutline(getX(), getY(), getWidth(), getHeight(), outline);
+                        Component cap = Component.literal(on ? "Enabled" : "Disabled");
+                        int tc = on ? 0xFF55FF55 : 0xFFFF5555;
+                        g.drawCenteredString(
+                                Minecraft.getInstance().font,
+                                cap,
+                                getX() + getWidth() / 2,
+                                getY() + (getHeight() - 8) / 2,
+                                tc);
+                    }
+
+                    @Override
+                    public void updateWidgetNarration(NarrationElementOutput n) {
+                        defaultButtonNarrationText(n);
+                    }
+                };
+        btn.setTooltip(Tooltip.create(Component.translatable("chat-utilities.settings.chat_timestamps.tooltip")));
+        return btn;
+    }
+
+    private AbstractWidget chatTimestampColorSettingButton(int x, int y, int w, int h) {
+        AbstractWidget b =
+                new AbstractWidget(x, y, w, h, Component.empty()) {
+                    @Override
+                    public void onClick(MouseButtonEvent event, boolean dbl) {
+                        ChatUtilitiesRootScreen.this.clearPendingChatHighlightPickState();
+                        ChatUtilitiesRootScreen.this.modColorPickerOverlay =
+                                ModPrimaryColorPickerOverlay.createTimestampRgb();
+                    }
+
+                    @Override
+                    protected void renderWidget(GuiGraphics g, int mx, int my, float pt) {
+                        boolean hov = this.isHovered();
+                        boolean act = this.active;
+                        int bg = !act ? 0x25000000 : hov ? 0x55FFFFFF : 0x35000000;
+                        int outline = !act ? 0x25FFFFFF : hov ? 0x70FFFFFF : 0x40FFFFFF;
+                        g.fill(getX(), getY(), getX() + getWidth(), getY() + getHeight(), bg);
+                        g.renderOutline(getX(), getY(), getWidth(), getHeight(), outline);
+                        int rgb = ChatUtilitiesClientOptions.getChatTimestampColorRgb() | 0xFF000000;
+                        int sx = getX() + 6;
+                        int sy = getY() + (getHeight() - 14) / 2;
+                        g.fill(sx, sy, sx + 14, sy + 14, rgb);
+                        g.renderOutline(sx, sy, 14, 14, 0xFFAAAAAA);
+                        String cap = I18n.get("chat-utilities.settings.chat_timestamp_color.change");
+                        g.drawString(
+                                Minecraft.getInstance().font,
+                                cap,
+                                sx + 18,
+                                getY() + (getHeight() - 8) / 2,
+                                0xFFBBBBCC,
+                                false);
+                    }
+
+                    @Override
+                    public void updateWidgetNarration(NarrationElementOutput n) {
+                        defaultButtonNarrationText(n);
+                    }
+                };
+        b.setTooltip(Tooltip.create(Component.translatable("chat-utilities.settings.chat_timestamp_color.tooltip")));
+        return b;
     }
 
     private AbstractWidget flatButtonClickToCopy(int x, int y, int w, int h) {
@@ -2059,6 +4392,62 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         return bindBtn;
     }
 
+    private AbstractWidget flatButtonFullscreenImageClickBinding(int x, int y, int width, int h) {
+        AbstractWidget bindBtn =
+                new AbstractWidget(x, y, width, h, Component.literal(fullscreenClickBindCaptionOnly())) {
+                    @Override
+                    protected boolean isValidClickButton(MouseButtonInfo info) {
+                        int b = info.button();
+                        return b == 0 || b == 1;
+                    }
+
+                    @Override
+                    public void onClick(MouseButtonEvent event, boolean doubleClick) {
+                        if (event.button() == 1) {
+                            ChatUtilitiesClientOptions.setFullscreenImagePreviewClickBinding(
+                                    ChatUtilitiesClientOptions.ClickMouseBinding.defaultFullscreenImagePreview());
+                            rebindingOpenMenuKey = false;
+                            rebindingFullscreenImageClick = false;
+                            rebindingCopyPlain = false;
+                            rebindingCopyFormatted = false;
+                            init();
+                            return;
+                        }
+                        rebindingOpenMenuKey = false;
+                        rebindingCopyPlain = false;
+                        rebindingCopyFormatted = false;
+                        rebindingFullscreenImageClick = true;
+                        init();
+                    }
+
+                    @Override
+                    protected void renderWidget(GuiGraphics g, int mx, int my, float pt) {
+                        boolean hov = this.isHovered();
+                        boolean act = this.active;
+                        int bg = !act ? 0x25000000 : hov ? 0x55FFFFFF : 0x35000000;
+                        int outline = !act ? 0x25FFFFFF : hov ? 0x70FFFFFF : 0x40FFFFFF;
+                        g.fill(getX(), getY(), getX() + getWidth(), getY() + getHeight(), bg);
+                        g.renderOutline(getX(), getY(), getWidth(), getHeight(), outline);
+                        int tc = !act ? 0xFF555565 : hov ? 0xFFFFFFFF : 0xFFBBBBCC;
+                        g.drawCenteredString(
+                                Minecraft.getInstance().font,
+                                Component.literal(fullscreenClickBindCaptionOnly()),
+                                getX() + getWidth() / 2,
+                                getY() + (getHeight() - 8) / 2,
+                                tc);
+                    }
+
+                    @Override
+                    public void updateWidgetNarration(NarrationElementOutput n) {
+                        defaultButtonNarrationText(n);
+                    }
+                };
+        bindBtn.setTooltip(
+                Tooltip.create(
+                        Component.translatable("chat-utilities.settings.image_preview_fullscreen_click.tooltip")));
+        return bindBtn;
+    }
+
     private String copyBindCaptionOnly(boolean plain) {
         if (plain ? rebindingCopyPlain : rebindingCopyFormatted) {
             return Component.translatable("chat-utilities.settings.rebind_click_prompt").getString();
@@ -2067,6 +4456,13 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                 plain
                         ? ChatUtilitiesClientOptions.getCopyPlainBinding()
                         : ChatUtilitiesClientOptions.getCopyFormattedBinding());
+    }
+
+    private String fullscreenClickBindCaptionOnly() {
+        if (rebindingFullscreenImageClick) {
+            return Component.translatable("chat-utilities.settings.rebind_click_prompt").getString();
+        }
+        return describeCopyMouseBinding(ChatUtilitiesClientOptions.getFullscreenImagePreviewClickBinding());
     }
 
     private static String describeCopyMouseBinding(ChatUtilitiesClientOptions.ClickMouseBinding b) {
@@ -2105,17 +4501,25 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         return settingsControlsFormY();
     }
 
-    private int settingsCopyPlainBindRowY() {
+    private int settingsChatPeekKeyRowY() {
         return settingsOpenMenuKeyRowY() + 28;
+    }
+
+    private int settingsCopyPlainBindRowY() {
+        return settingsChatPeekKeyRowY() + 28;
     }
 
     private int settingsCopyFormattedBindRowY() {
         return settingsCopyPlainBindRowY() + 28;
     }
 
+    private int settingsFullscreenImageClickRowY() {
+        return settingsCopyFormattedBindRowY() + 28;
+    }
+
     /** Click to copy section (labels in {@link #renderSettingsPanelExtras}). */
     private int settingsClickCopySectionTitleY() {
-        return settingsCopyFormattedBindRowY() + 28 + SETTINGS_SECTION_GAP;
+        return settingsFullscreenImageClickRowY() + 28 + SETTINGS_SECTION_GAP;
     }
 
     private int settingsClickCopyFormY() {
@@ -2166,8 +4570,64 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         return settingsLongerChatHistoryRowY() + 28;
     }
 
+    private int settingsTimestampSectionTitleY() {
+        return settingsChatHistoryLimitRowY() + 28 + 12;
+    }
+
+    private int settingsTimestampFormY() {
+        return settingsTimestampSectionTitleY() + settingsSectionHeaderH() + 6;
+    }
+
+    private int settingsTimestampShowRowY() {
+        return settingsTimestampFormY();
+    }
+
+    private int settingsTimestampColorRowY() {
+        return settingsTimestampShowRowY() + 28;
+    }
+
+    private int settingsTimestampFormatRowY() {
+        return settingsTimestampColorRowY() + 28;
+    }
+
+    private int settingsChatSearchSectionTitleY() {
+        return settingsTimestampFormatRowY() + 28 + SETTINGS_SECTION_GAP;
+    }
+
+    private int settingsChatSearchFormY() {
+        return settingsChatSearchSectionTitleY() + settingsSectionHeaderH() + 6;
+    }
+
+    private int settingsChatSearchEnabledRowY() {
+        return settingsChatSearchFormY();
+    }
+
+    private int settingsChatSearchPositionRowY() {
+        return settingsChatSearchEnabledRowY() + 28;
+    }
+
+    private int settingsImagePreviewSectionTitleY() {
+        return settingsChatSearchPositionRowY() + 28 + SETTINGS_SECTION_GAP;
+    }
+
+    private int settingsImagePreviewFormY() {
+        return settingsImagePreviewSectionTitleY() + settingsSectionHeaderH() + 6;
+    }
+
+    private int settingsImagePreviewEnabledRowY() {
+        return settingsImagePreviewFormY();
+    }
+
+    private int settingsImagePreviewWhitelistRowY() {
+        return settingsImagePreviewEnabledRowY() + 28;
+    }
+
+    private int settingsImagePreviewAllowUntrustedDomainsRowY() {
+        return settingsImagePreviewWhitelistRowY() + 28;
+    }
+
     private int settingsSymbolSectionTitleY() {
-        return settingsChatHistoryLimitRowY() + 28 + SETTINGS_SECTION_GAP;
+        return settingsImagePreviewAllowUntrustedDomainsRowY() + 28 + SETTINGS_SECTION_GAP;
     }
 
     private int settingsSymbolSectionFormY() {
@@ -2190,8 +4650,20 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         return settingsOtherSectionTitleY() + settingsSectionHeaderH() + 6;
     }
 
-    private int settingsShadowRowY() {
+    private int settingsChatPanelBackgroundRowY() {
         return settingsOtherSectionFormY();
+    }
+
+    private int settingsChatPanelBackgroundFocusedRowY() {
+        return settingsChatPanelBackgroundRowY() + 28;
+    }
+
+    private int settingsChatBarBackgroundRowY() {
+        return settingsChatPanelBackgroundFocusedRowY() + 28;
+    }
+
+    private int settingsShadowRowY() {
+        return settingsChatBarBackgroundRowY() + 28;
     }
 
     private int settingsStackRepeatedMessagesRowY() {
@@ -2202,8 +4674,24 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         return settingsStackRepeatedMessagesRowY() + 28;
     }
 
+    private int settingsModPrimaryColorRowY() {
+        return settingsChatBarMenuButtonRowY() + 28;
+    }
+
+    private int settingsTabUnreadBadgesRowY() {
+        return settingsModPrimaryColorRowY() + 28;
+    }
+
+    private int settingsAlwaysShowUnreadTabsRowY() {
+        return settingsTabUnreadBadgesRowY() + 28;
+    }
+
+    private int settingsIgnoreSelfChatActionsRowY() {
+        return settingsAlwaysShowUnreadTabsRowY() + 28;
+    }
+
     private int settingsProfilesTitleY() {
-        return settingsChatBarMenuButtonRowY() + 28 + SETTINGS_SECTION_GAP;
+        return settingsIgnoreSelfChatActionsRowY() + 28 + SETTINGS_SECTION_GAP;
     }
 
     private int settingsProfilesFormY() {
@@ -2220,7 +4708,10 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
 
     /** Bottom Y (exclusive) of the scrollable settings block in logical (unscrolled) coordinates. */
     private int settingsScrollableBottomLogical() {
-        return settingsProfilesFormY() + 20;
+        // Profiles section currently contains at least one full row of controls; add extra tail padding so the last
+        // row doesn't visually merge into the footer.
+        // Rows: Import/Export, LabyMod Import, plus tail padding.
+        return settingsProfilesFormY() + 20 + 28 + 20 + 28;
     }
 
     private int settingsScrollableContentHeight() {
@@ -2244,13 +4735,82 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         settingsScrollClipRenderables.add(w);
     }
 
+    private void addChatWindowsScrollClipWidget(AbstractWidget w) {
+        addRenderableWidget(w);
+        chatWindowsScrollClipRenderables.add(w);
+    }
+
+    private void addChatWindowsNonClipWidget(AbstractWidget w) {
+        addRenderableWidget(w);
+        chatWindowsNonClipRenderables.add(w);
+    }
+
+    private int chatWindowsScrollViewportTop() {
+        return bodyY();
+    }
+
+    private int chatWindowsScrollViewportBottom() {
+        return footerY() - WIN_LIST_FOOTER_GAP;
+    }
+
+    private int chatWindowsScrollViewportHeight() {
+        return Math.max(0, chatWindowsScrollViewportBottom() - chatWindowsScrollViewportTop());
+    }
+
+    private int chatWindowsMaxContentScroll() {
+        return Math.max(0, chatWindowsTotalListHeight - chatWindowsListViewportHeight);
+    }
+
+    private void relayoutChatWindowsDuringThinThumbDrag() {
+        double anchorScroll = thinScrollDragAnchorScroll;
+        int anchorMy = thinScrollDragAnchorMy;
+        init();
+        thinScrollDrag = ThinScrollDrag.CHAT_WINDOWS_THUMB;
+        thinScrollDragAnchorScroll = anchorScroll;
+        thinScrollDragAnchorMy = anchorMy;
+        int vt = chatWindowsScrollViewportTop();
+        int vh = chatWindowsListViewportHeight;
+        int ch = chatWindowsTotalListHeight;
+        ThinScrollbar.Metrics m = ThinScrollbar.Metrics.compute(vt, vh, ch, chatWindowsListScrollPixels);
+        if (m != null) {
+            thinScrollDragMaxTravel = m.maxTravel;
+            thinScrollDragMaxScroll = m.maxScroll;
+        }
+    }
+
+    private void relayoutChatWindowsDuringContentDragScroll() {
+        int anchorMy = chatWindowsContentDragAnchorMy;
+        int anchorScroll = chatWindowsContentDragAnchorScroll;
+        init();
+        chatWindowsContentDragScroll = true;
+        chatWindowsContentDragAnchorMy = anchorMy;
+        chatWindowsContentDragAnchorScroll = anchorScroll;
+    }
+
+    private void relayoutChatWindowsDuringMenuTabDrag() {
+        String wid = menuDragWindowId;
+        String tid = menuDragTabId;
+        int from = menuDragFromIndex;
+        int hover = menuDragHoverIndex;
+        double pressX = menuDragPressX;
+        double pressY = menuDragPressY;
+        boolean didMove = menuDragDidMove;
+        init();
+        menuDragWindowId = wid;
+        menuDragTabId = tid;
+        menuDragFromIndex = from;
+        menuDragHoverIndex = hover;
+        menuDragPressX = pressX;
+        menuDragPressY = pressY;
+        menuDragDidMove = didMove;
+    }
+
     private void renderSettingsPanelExtras(GuiGraphics g) {
         if (activePanel != Panel.SETTINGS) {
             return;
         }
         int fx = contentLeft();
-        int fr =
-                contentRight() - (settingsMaxContentScroll() > 0 ? ThinScrollbar.W : 0);
+        int fr = contentRight() - scrollbarReserve(settingsMaxContentScroll() > 0);
         int vt = settingsScrollViewportTop();
         int vb = settingsScrollViewportBottom();
         g.enableScissor(fx, vt, fr, vb);
@@ -2270,6 +4830,13 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                     false);
             g.drawString(
                     this.font,
+                    Component.translatable("key.chatutilities.chat_peek"),
+                    fx,
+                    settingsScrolledY(settingsChatPeekKeyRowY()) + 7,
+                    ChatUtilitiesScreenLayout.TEXT_LABEL,
+                    false);
+            g.drawString(
+                    this.font,
                     Component.translatable("chat-utilities.settings.copy_plain_bind"),
                     fx,
                     settingsScrolledY(settingsCopyPlainBindRowY()) + 7,
@@ -2280,6 +4847,13 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                     Component.translatable("chat-utilities.settings.copy_formatted_bind"),
                     fx,
                     settingsScrolledY(settingsCopyFormattedBindRowY()) + 7,
+                    ChatUtilitiesScreenLayout.TEXT_LABEL,
+                    false);
+            g.drawString(
+                    this.font,
+                    Component.translatable("key.chatutilities.image_preview_fullscreen"),
+                    fx,
+                    settingsScrolledY(settingsFullscreenImageClickRowY()) + 7,
                     ChatUtilitiesScreenLayout.TEXT_LABEL,
                     false);
 
@@ -2357,6 +4931,95 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                     g,
                     fx,
                     fr,
+                    settingsScrolledY(settingsTimestampSectionTitleY()),
+                    I18n.get("chat-utilities.settings.section.timestamp"));
+            g.drawString(
+                    this.font,
+                    Component.translatable("chat-utilities.settings.chat_timestamps"),
+                    fx,
+                    settingsScrolledY(settingsTimestampShowRowY()) + 7,
+                    ChatUtilitiesScreenLayout.TEXT_LABEL,
+                    false);
+            g.drawString(
+                    this.font,
+                    Component.translatable("chat-utilities.settings.chat_timestamp_color"),
+                    fx,
+                    settingsScrolledY(settingsTimestampColorRowY()) + 7,
+                    ChatUtilitiesScreenLayout.TEXT_LABEL,
+                    false);
+            g.drawString(
+                    this.font,
+                    Component.translatable("chat-utilities.settings.chat_timestamp_format"),
+                    fx,
+                    settingsScrolledY(settingsTimestampFormatRowY()) + 7,
+                    ChatUtilitiesScreenLayout.TEXT_LABEL,
+                    false);
+            if (settingsTimestampFormatField != null) {
+                String pv =
+                        ChatTimestampFormatter.previewPlainForPattern(
+                                settingsTimestampFormatField.getValue(), System.currentTimeMillis());
+                int pRgb = ChatUtilitiesClientOptions.getChatTimestampColorRgb() | 0xFF000000;
+                int rowY = settingsScrolledY(settingsTimestampFormatRowY()) + 6;
+                int fmtGap = 4;
+                int slotLeft =
+                        settingsTimestampFormatField.getX() - settingsTimestampPreviewSlotW - fmtGap;
+                int tx = slotLeft + settingsTimestampPreviewSlotW - this.font.width(pv);
+                g.drawString(this.font, pv, Math.max(slotLeft, tx), rowY, pRgb, false);
+            }
+
+            drawSettingsSectionHeader(
+                    g,
+                    fx,
+                    fr,
+                    settingsScrolledY(settingsChatSearchSectionTitleY()),
+                    I18n.get("chat-utilities.settings.section.chat_search"));
+            g.drawString(
+                    this.font,
+                    Component.translatable("chat-utilities.settings.chat_search_bar"),
+                    fx,
+                    settingsScrolledY(settingsChatSearchEnabledRowY()) + 7,
+                    ChatUtilitiesScreenLayout.TEXT_LABEL,
+                    false);
+            g.drawString(
+                    this.font,
+                    Component.translatable("chat-utilities.settings.chat_search_bar_position"),
+                    fx,
+                    settingsScrolledY(settingsChatSearchPositionRowY()) + 7,
+                    ChatUtilitiesScreenLayout.TEXT_LABEL,
+                    false);
+
+            drawSettingsSectionHeader(
+                    g,
+                    fx,
+                    fr,
+                    settingsScrolledY(settingsImagePreviewSectionTitleY()),
+                    I18n.get("chat-utilities.settings.section.image_preview"));
+            g.drawString(
+                    this.font,
+                    Component.translatable("chat-utilities.settings.image_preview.enabled"),
+                    fx,
+                    settingsScrolledY(settingsImagePreviewEnabledRowY()) + 7,
+                    ChatUtilitiesScreenLayout.TEXT_LABEL,
+                    false);
+            g.drawString(
+                    this.font,
+                    Component.translatable("chat-utilities.settings.image_preview.whitelist_button_label"),
+                    fx,
+                    settingsScrolledY(settingsImagePreviewWhitelistRowY()) + 7,
+                    ChatUtilitiesScreenLayout.TEXT_LABEL,
+                    false);
+            g.drawString(
+                    this.font,
+                    Component.translatable("chat-utilities.settings.image_preview.allow_untrusted_domains"),
+                    fx,
+                    settingsScrolledY(settingsImagePreviewAllowUntrustedDomainsRowY()) + 7,
+                    ChatUtilitiesScreenLayout.TEXT_LABEL,
+                    false);
+
+            drawSettingsSectionHeader(
+                    g,
+                    fx,
+                    fr,
                     settingsScrolledY(settingsSymbolSectionTitleY()),
                     I18n.get("chat-utilities.settings.section.symbol_selector"));
             g.drawString(
@@ -2382,6 +5045,27 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                     I18n.get("chat-utilities.settings.section.other"));
             g.drawString(
                     this.font,
+                    Component.translatable("chat-utilities.settings.chat_panel_background_opacity.unfocused"),
+                    fx,
+                    settingsScrolledY(settingsChatPanelBackgroundRowY()) + 7,
+                    ChatUtilitiesScreenLayout.TEXT_LABEL,
+                    false);
+            g.drawString(
+                    this.font,
+                    Component.translatable("chat-utilities.settings.chat_panel_background_opacity.focused"),
+                    fx,
+                    settingsScrolledY(settingsChatPanelBackgroundFocusedRowY()) + 7,
+                    ChatUtilitiesScreenLayout.TEXT_LABEL,
+                    false);
+            g.drawString(
+                    this.font,
+                    Component.translatable("chat-utilities.settings.chat_bar_background_opacity"),
+                    fx,
+                    settingsScrolledY(settingsChatBarBackgroundRowY()) + 7,
+                    ChatUtilitiesScreenLayout.TEXT_LABEL,
+                    false);
+            g.drawString(
+                    this.font,
                     Component.translatable("chat-utilities.settings.chat_text_shadow"),
                     fx,
                     settingsScrolledY(settingsShadowRowY()) + 7,
@@ -2401,6 +5085,34 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                     settingsScrolledY(settingsChatBarMenuButtonRowY()) + 7,
                     ChatUtilitiesScreenLayout.TEXT_LABEL,
                     false);
+            g.drawString(
+                    this.font,
+                    Component.translatable("chat-utilities.settings.mod_primary_color"),
+                    fx,
+                    settingsScrolledY(settingsModPrimaryColorRowY()) + 7,
+                    ChatUtilitiesScreenLayout.TEXT_LABEL,
+                    false);
+            g.drawString(
+                    this.font,
+                    Component.translatable("chat-utilities.settings.tab_unread_badges"),
+                    fx,
+                    settingsScrolledY(settingsTabUnreadBadgesRowY()) + 7,
+                    ChatUtilitiesScreenLayout.TEXT_LABEL,
+                    false);
+            g.drawString(
+                    this.font,
+                    Component.literal("Always Show Unread Tabs"),
+                    fx,
+                    settingsScrolledY(settingsAlwaysShowUnreadTabsRowY()) + 7,
+                    ChatUtilitiesScreenLayout.TEXT_LABEL,
+                    false);
+            g.drawString(
+                    this.font,
+                    Component.translatable("chat-utilities.settings.ignore_self_chat_actions"),
+                    fx,
+                    settingsScrolledY(settingsIgnoreSelfChatActionsRowY()) + 7,
+                    ChatUtilitiesScreenLayout.TEXT_LABEL,
+                    false);
 
             drawSettingsSectionHeader(
                     g,
@@ -2417,7 +5129,7 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         int h = settingsSectionHeaderH();
         g.fill(fx, y, fr, y + h, C_WIN_GROUP_BG);
         g.renderOutline(fx, y, fr - fx, h, C_WIN_GROUP_EDGE);
-        g.fill(fx, y, fx + 2, y + h, C_ACCENT);
+        g.fill(fx, y, fx + 2, y + h, modAccentArgb());
         g.drawString(this.font, title, fx + 8, y + (h - 8) / 2, 0xFFE8EEF8, false);
     }
 
@@ -2433,66 +5145,103 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
     }
 
     private void runExportProfilesDialog() {
+        runExportProfilesDialog(false);
+    }
+
+    private void runExportProfilesDialog(boolean includeSettings) {
         if (this.minecraft == null) {
             return;
         }
-        try {
-            if (GraphicsEnvironment.isHeadless()) {
-                showSettingsToast("Export", "File dialog unavailable in this environment");
-                return;
-            }
-            FileDialog fd = new FileDialog((java.awt.Frame) null, "Export Profiles", FileDialog.SAVE);
-            fd.setFile("chat-utilities-profiles.json");
-            fd.setVisible(true);
-            String f = fd.getFile();
-            String d = fd.getDirectory();
-            if (f == null || d == null) {
-                return;
-            }
-            Path path = Path.of(d, f);
-            Files.writeString(path, ChatUtilitiesManager.get().serializeProfilesToJson(), StandardCharsets.UTF_8);
-            showSettingsToast("Profiles exported", path.getFileName().toString());
-        } catch (IOException e) {
-            showSettingsToast("Export failed", e.getMessage() != null ? e.getMessage() : "");
-        }
+        this.minecraft.setScreen(ProfileImportExportSelectScreen.forExport(this, includeSettings));
     }
 
     private void runImportProfilesDialog() {
+        runImportProfilesDialog(false);
+    }
+
+    private void runImportProfilesDialog(boolean includeSettings) {
         if (this.minecraft == null) {
             return;
         }
         try {
-            if (GraphicsEnvironment.isHeadless()) {
-                showSettingsToast("Import", "File dialog unavailable in this environment");
+            String json = null;
+            Optional<Path> src = ProfileJsonFileDialog.pickOpenJson(PROFILES_JSON_DEFAULT_DIR);
+            if (src.isPresent() && Files.isRegularFile(src.get())) {
+                json = Files.readString(src.get(), StandardCharsets.UTF_8);
+            }
+            if (json == null || json.isBlank()) {
+                json = this.minecraft.keyboardHandler.getClipboard();
+            }
+            if (json == null || json.isBlank()) {
+                showSettingsToast(
+                        I18n.get("chat-utilities.settings.import_profiles.toast.empty.title"),
+                        I18n.get("chat-utilities.settings.import_profiles.toast.empty.detail"));
                 return;
             }
-            FileDialog fd = new FileDialog((java.awt.Frame) null, "Import Profiles", FileDialog.LOAD);
-            fd.setVisible(true);
-            String f = fd.getFile();
-            String d = fd.getDirectory();
-            if (f == null || d == null) {
+            // Accept either a raw profiles export or a combined object (profiles + settings).
+            JsonObject obj;
+            try {
+                obj = JsonParser.parseString(json).getAsJsonObject();
+            } catch (Exception ignored) {
+                obj = new JsonObject();
+                obj.add("profiles", JsonParser.parseString(json));
+            }
+            this.minecraft.setScreen(ProfileImportExportSelectScreen.forImport(this, obj.toString(), includeSettings));
+        } catch (JsonParseException e) {
+            showSettingsToast(
+                    I18n.get("chat-utilities.settings.import_profiles.toast.invalid.title"),
+                    I18n.get("chat-utilities.settings.import_profiles.toast.invalid.detail"));
+        } catch (IOException e) {
+            showSettingsToast(
+                    I18n.get("chat-utilities.settings.import_profiles.toast.error.title"),
+                    e.getMessage() != null ? e.getMessage() : "");
+        }
+    }
+
+    private void runImportLabyModProfilesDialog() {
+        if (this.minecraft == null) {
+            return;
+        }
+        try {
+            String json = null;
+            Optional<Path> src = ProfileJsonFileDialog.pickOpenJson(PROFILES_JSON_DEFAULT_DIR);
+            if (src.isPresent() && Files.isRegularFile(src.get())) {
+                json = Files.readString(src.get(), StandardCharsets.UTF_8);
+            }
+            if (json == null || json.isBlank()) {
+                showSettingsToast(
+                        I18n.get("chat-utilities.settings.import_profiles.toast.empty.title"),
+                        "No file selected.");
                 return;
             }
-            Path path = Path.of(d, f);
-            String json = Files.readString(path, StandardCharsets.UTF_8);
-            int added = ChatUtilitiesManager.get().importProfilesFromJson(json);
+            int added = ChatUtilitiesManager.get().importProfileFromLabyModJson(json);
             if (added == 0) {
-                showSettingsToast("Import", "No profiles were added");
+                showSettingsToast(
+                        I18n.get("chat-utilities.settings.import_profiles.toast.none.title"),
+                        "Nothing imported.");
             } else {
-                showSettingsToast("Profiles imported", added + " profile(s) merged");
+                showSettingsToast(
+                        I18n.get("chat-utilities.settings.import_profiles.toast.ok.title"),
+                        "Imported LabyMod profile.");
             }
             init();
         } catch (JsonParseException e) {
-            showSettingsToast("Import failed", "Invalid JSON");
+            showSettingsToast(
+                    I18n.get("chat-utilities.settings.import_profiles.toast.invalid.title"),
+                    "Invalid LabyMod JSON.");
         } catch (IOException e) {
-            showSettingsToast("Import failed", e.getMessage() != null ? e.getMessage() : "");
+            showSettingsToast(
+                    I18n.get("chat-utilities.settings.import_profiles.toast.error.title"),
+                    e.getMessage() != null ? e.getMessage() : "");
         }
     }
 
     /** Short label for the keybind button (name is shown beside it as static text). */
-    private String keybindCaptionOnly() {
-        KeyMapping km = ChatUtilitiesModClient.OPEN_MENU_KEY;
-        if (rebindingOpenMenuKey) {
+    private String keybindCaptionOnly(KeyMapping km, boolean rebinding) {
+        if (km == null) {
+            return "Not bound";
+        }
+        if (rebinding) {
             return "Press a key…";
         }
         if (km.isUnbound()) {
@@ -2564,14 +5313,160 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         return mixProfileAccentArgb(base, light, active ? 0.88f : 0.80f);
     }
 
+    /**
+     * Rebuilds widgets with the new {@link #settingsContentScroll} while keeping thin-scrollbar thumb drag active
+     * ({@code init()} normally clears {@link #thinScrollDrag}).
+     */
+    private void relayoutSettingsDuringThinThumbDrag() {
+        double anchorScroll = thinScrollDragAnchorScroll;
+        int anchorMy = thinScrollDragAnchorMy;
+        init();
+        thinScrollDrag = ThinScrollDrag.SETTINGS_THUMB;
+        thinScrollDragAnchorScroll = anchorScroll;
+        thinScrollDragAnchorMy = anchorMy;
+        int vt = settingsScrollViewportTop();
+        int vh = settingsScrollViewportHeight();
+        int ch = settingsScrollableContentHeight();
+        ThinScrollbar.Metrics m = ThinScrollbar.Metrics.compute(vt, vh, ch, settingsContentScroll);
+        if (m != null) {
+            thinScrollDragMaxTravel = m.maxTravel;
+            thinScrollDragMaxScroll = m.maxScroll;
+        }
+    }
+
+    private void thinScrollbarDragTick() {
+        if (thinScrollDrag == ThinScrollDrag.NONE || this.minecraft == null) {
+            return;
+        }
+        long h = this.minecraft.getWindow().handle();
+        if (GLFW.glfwGetMouseButton(h, GLFW.GLFW_MOUSE_BUTTON_LEFT) != GLFW.GLFW_PRESS) {
+            thinScrollDrag = ThinScrollDrag.NONE;
+            return;
+        }
+        int my = (int) this.minecraft.mouseHandler.getScaledYPos(this.minecraft.getWindow());
+        switch (thinScrollDrag) {
+            case SETTINGS_THUMB -> {
+                int max = settingsMaxContentScroll();
+                if (max <= 0) {
+                    thinScrollDrag = ThinScrollDrag.NONE;
+                    return;
+                }
+                double next =
+                        thinScrollDragAnchorScroll
+                                + (my - thinScrollDragAnchorMy)
+                                        * thinScrollDragMaxScroll
+                                        / (double) thinScrollDragMaxTravel;
+                int clamped = Mth.clamp((int) Math.round(next), 0, max);
+                if (clamped != settingsContentScroll) {
+                    settingsContentScroll = clamped;
+                    relayoutSettingsDuringThinThumbDrag();
+                }
+            }
+            case CHAT_WINDOWS_THUMB -> {
+                int max = Math.max(0, chatWindowsTotalListHeight - chatWindowsListViewportHeight);
+                if (max <= 0) {
+                    thinScrollDrag = ThinScrollDrag.NONE;
+                    return;
+                }
+                double next =
+                        thinScrollDragAnchorScroll
+                                + (my - thinScrollDragAnchorMy)
+                                        * thinScrollDragMaxScroll
+                                        / (double) thinScrollDragMaxTravel;
+                int clamped = Mth.clamp((int) Math.round(next), 0, max);
+                if (clamped != chatWindowsListScrollPixels) {
+                    chatWindowsListScrollPixels = clamped;
+                    relayoutChatWindowsDuringThinThumbDrag();
+                }
+            }
+            default -> {}
+        }
+    }
+
+    private boolean tryThinScrollbarMouseDown(double mx, double my) {
+        if (modColorPickerOverlay != null || imageWhitelistOverlay != null) {
+            return false;
+        }
+        int ix = (int) mx;
+        int iy = (int) my;
+        int barX = contentRight() - ThinScrollbar.W;
+        int hitL = barX + ThinScrollbar.W - ThinScrollbar.HIT_W;
+        int hitR = barX + ThinScrollbar.W;
+        if (activePanel == Panel.SETTINGS && settingsMaxContentScroll() > 0) {
+            int vt = settingsScrollViewportTop();
+            int vh = settingsScrollViewportHeight();
+            int ch = settingsScrollableContentHeight();
+            if (ix >= hitL && ix < hitR && iy >= vt && iy < vt + vh) {
+                ThinScrollbar.Metrics m =
+                        ThinScrollbar.Metrics.compute(vt, vh, ch, settingsContentScroll);
+                if (m == null) {
+                    return false;
+                }
+                if (m.thumbContainsY(iy)) {
+                    thinScrollDrag = ThinScrollDrag.SETTINGS_THUMB;
+                    thinScrollDragAnchorScroll = settingsContentScroll;
+                    thinScrollDragAnchorMy = iy;
+                    thinScrollDragMaxTravel = m.maxTravel;
+                    thinScrollDragMaxScroll = m.maxScroll;
+                } else {
+                    settingsContentScroll =
+                            Mth.clamp(m.scrollPixelsForTrackClickY(vt, iy), 0, settingsMaxContentScroll());
+                }
+                return true;
+            }
+        }
+        if (activePanel == Panel.CHAT_WINDOWS && chatWindowsShowScrollbar) {
+            int vt = bodyY();
+            int vh = chatWindowsListViewportHeight;
+            int ch = chatWindowsTotalListHeight;
+            if (ix >= hitL && ix < hitR && iy >= vt && iy < vt + vh) {
+                ThinScrollbar.Metrics m =
+                        ThinScrollbar.Metrics.compute(vt, vh, ch, chatWindowsListScrollPixels);
+                if (m == null) {
+                    return false;
+                }
+                int max = Math.max(0, ch - vh);
+                if (m.thumbContainsY(iy)) {
+                    thinScrollDrag = ThinScrollDrag.CHAT_WINDOWS_THUMB;
+                    thinScrollDragAnchorScroll = chatWindowsListScrollPixels;
+                    thinScrollDragAnchorMy = iy;
+                    thinScrollDragMaxTravel = m.maxTravel;
+                    thinScrollDragMaxScroll = m.maxScroll;
+                } else {
+                    chatWindowsListScrollPixels =
+                            Mth.clamp(m.scrollPixelsForTrackClickY(vt, iy), 0, max);
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
     private void resetScrolls() {
         serverScroll = 0;
         winScroll = 0;
-        ignScroll = 0;
-        ruleScroll = 0;
+        actionScroll = 0;
+        aliasScroll = 0;
         settingsContentScroll = 0;
+        thinScrollDrag = ThinScrollDrag.NONE;
         expandedWindowIds.clear();
-        windowPatScroll.clear();
+        windowTabPatScroll.clear();
+        menuWindowTabId.clear();
+        menuExpandedChatWindowsPersisted.clear();
+        menuExpandedChatWindowsProfileId = null;
+    }
+
+    private static String removeTabConfirmKey(String windowId, String tabId) {
+        return windowId + "\0" + tabId;
+    }
+
+    private void persistMenuExpandedChatWindows(ServerProfile p) {
+        if (p == null) {
+            return;
+        }
+        menuExpandedChatWindowsProfileId = p.getId();
+        menuExpandedChatWindowsPersisted.clear();
+        menuExpandedChatWindowsPersisted.addAll(expandedWindowIds);
     }
 
     /** Returns the profile list sorted so the currently active server's profile comes first. */
@@ -2583,8 +5478,8 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         return switch (activePanel) {
             case EDIT_PROFILE -> "Edit Profile";
             case CHAT_WINDOWS -> "Chat Windows";
-            case IGNORED_CHAT -> "Ignored Chat";
-            case CHAT_SOUNDS -> "Chat Sounds";
+            case CHAT_ACTIONS -> "Chat Actions";
+            case COMMAND_ALIASES -> I18n.get("chat-utilities.command_aliases.title");
             case SETTINGS -> "Settings";
             default -> "Server Profiles";
         };
@@ -2598,10 +5493,9 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
             case CHAT_WINDOWS ->
                     "Create separate chat surfaces on your HUD so you can follow different streams of "
                             + "messages without losing the main chat.";
-            case IGNORED_CHAT ->
-                    "Choose which messages are filtered out entirely so your chat stays focused on what matters.";
-            case CHAT_SOUNDS ->
-                    "Get audio feedback when messages match what you care about, separate from how they appear on screen.";
+            case CHAT_ACTIONS ->
+                    "Ignore matching messages or play a sound when they arrive — one list, pick the action per rule.";
+            case COMMAND_ALIASES -> I18n.get("chat-utilities.command_aliases.description");
             case SETTINGS ->
                     "Adjust how this mod behaves on your client: shortcuts, convenience options, and backing up or "
                             + "sharing your profiles.";
@@ -2615,14 +5509,16 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
     @Override
     public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
         EditBox soundAnchor = activeSoundSuggestionField();
-        if (!(activePanel == Panel.CHAT_SOUNDS && soundAnchor != null)) {
+        if (!(activePanel == Panel.CHAT_ACTIONS && soundAnchor != null)) {
             sugFiltered = List.of();
+        }
+        EditBox cmdAnchor = activeCommandSuggestionField();
+        if (!(activePanel == Panel.COMMAND_ALIASES && cmdAnchor != null)) {
+            cmdSugFiltered = List.of();
         }
         if (activePanel == Panel.SETTINGS && !settingsScrollClipRenderables.isEmpty()) {
             int cl = contentLeft();
-            int cr =
-                    contentRight()
-                            - (settingsMaxContentScroll() > 0 ? ThinScrollbar.W : 0);
+            int cr = contentRight() - scrollbarReserve(settingsMaxContentScroll() > 0);
             int vt = settingsScrollViewportTop();
             int vb = settingsScrollViewportBottom();
             graphics.enableScissor(cl, vt, cr, vb);
@@ -2634,6 +5530,22 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                 graphics.disableScissor();
             }
             for (Renderable renderable : settingsNonClipRenderables) {
+                renderable.render(graphics, mouseX, mouseY, partialTick);
+            }
+        } else if (activePanel == Panel.CHAT_WINDOWS && !chatWindowsScrollClipRenderables.isEmpty()) {
+            int cl = contentLeft();
+            int cr = contentRight() - scrollbarReserve(chatWindowsShowScrollbar);
+            int vt = chatWindowsScrollViewportTop();
+            int vb = chatWindowsScrollViewportBottom();
+            graphics.enableScissor(cl, vt, cr, vb);
+            try {
+                for (Renderable renderable : chatWindowsScrollClipRenderables) {
+                    renderable.render(graphics, mouseX, mouseY, partialTick);
+                }
+            } finally {
+                graphics.disableScissor();
+            }
+            for (Renderable renderable : chatWindowsNonClipRenderables) {
                 renderable.render(graphics, mouseX, mouseY, partialTick);
             }
         } else {
@@ -2662,15 +5574,38 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                     chatWindowsListScrollPixels,
                     1f);
         }
+        renderChatActionTypeDropdownOnTop(graphics, mouseX, mouseY);
         soundAnchor = activeSoundSuggestionField();
-        if (activePanel == Panel.CHAT_SOUNDS && soundAnchor != null) {
+        if (activePanel == Panel.CHAT_ACTIONS && soundAnchor != null) {
             renderSoundSuggestions(graphics, mouseX, mouseY, soundAnchor);
+        }
+        cmdAnchor = activeCommandSuggestionField();
+        if (activePanel == Panel.COMMAND_ALIASES && cmdAnchor != null) {
+            renderCommandSuggestions(graphics, mouseX, mouseY, cmdAnchor);
         }
         if (createWinDialogOpen && activePanel == Panel.CHAT_WINDOWS) {
             renderCreateWindowDialogOnTop(graphics, mouseX, mouseY, partialTick);
         }
         if (renameDialogOpen && activePanel == Panel.CHAT_WINDOWS) {
             renderRenameWindowDialogOnTop(graphics, mouseX, mouseY, partialTick);
+        }
+        if (newTabDialogOpen && activePanel == Panel.CHAT_WINDOWS) {
+            renderNewTabDialogOnTop(graphics, mouseX, mouseY, partialTick);
+        }
+        if (renameTabDialogOpen && activePanel == Panel.CHAT_WINDOWS) {
+            renderRenameTabDialogOnTop(graphics, mouseX, mouseY, partialTick);
+        }
+        if (createProfileDialogOpen) {
+            renderCreateProfileDialogOnTop(graphics, mouseX, mouseY, partialTick);
+        }
+        if (importExportChoiceDialogOpen && activePanel == Panel.SETTINGS) {
+            renderImportExportChoiceDialogOnTop(graphics, mouseX, mouseY, partialTick);
+        }
+        if (modColorPickerOverlay != null) {
+            renderModPrimaryColorPickerOnTop(graphics, mouseX, mouseY, partialTick);
+        }
+        if (imageWhitelistOverlay != null) {
+            renderImageWhitelistOverlayOnTop(graphics, mouseX, mouseY, partialTick);
         }
     }
 
@@ -2729,18 +5664,151 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         }
     }
 
+    private void renderImportExportChoiceDialogOnTop(GuiGraphics g, int mouseX, int mouseY, float partialTick) {
+        int pl = panelLeft(), pr = panelRight(), pt = panelTop(), pb = panelBottom();
+        int dx = importExportDlgX, dy = importExportDlgY, dR = dx + importExportDlgW, dB = dy + importExportDlgH;
+        int dim = 0x78000000;
+        g.fill(pl, pt, pr, Math.min(dy, pb), dim);
+        g.fill(pl, Math.max(dB, pt), pr, pb, dim);
+        g.fill(pl, dy, dx, dB, dim);
+        g.fill(dR, dy, pr, dB, dim);
+
+        g.fill(dx, dy, dR, dB, C_PANEL_BG & 0x00FFFFFF | 0xFF000000);
+        g.renderOutline(dx, dy, importExportDlgW, importExportDlgH, 0xFF505068);
+        String title = importExportChoiceIsImport ? "Import" : "Export";
+        g.drawString(this.font, title, dx + 12, dy + 12, 0xFFFFFFFF, false);
+
+        if (importExportProfilesOnlyBtn != null) {
+            importExportProfilesOnlyBtn.render(g, mouseX, mouseY, partialTick);
+        }
+        if (importExportProfilesAndSettingsBtn != null) {
+            importExportProfilesAndSettingsBtn.render(g, mouseX, mouseY, partialTick);
+        }
+        if (importExportCancelBtn != null) {
+            importExportCancelBtn.render(g, mouseX, mouseY, partialTick);
+        }
+    }
+
+    private void renderNewTabDialogOnTop(GuiGraphics g, int mouseX, int mouseY, float partialTick) {
+        int pl = panelLeft(), pr = panelRight(), pt = panelTop(), pb = panelBottom();
+        int dx = newTabDlgX, dy = newTabDlgY, dR = dx + newTabDlgW, dB = dy + newTabDlgH;
+        int dim = 0x78000000;
+        g.fill(pl, pt, pr, Math.min(dy, pb), dim);
+        g.fill(pl, Math.max(dB, pt), pr, pb, dim);
+        g.fill(pl, dy, dx, dB, dim);
+        g.fill(dR, dy, pr, dB, dim);
+
+        g.fill(dx, dy, dR, dB, C_PANEL_BG & 0x00FFFFFF | 0xFF000000);
+        g.renderOutline(dx, dy, newTabDlgW, newTabDlgH, 0xFF505068);
+        g.drawString(this.font, "New Chat Tab", dx + 12, dy + 12, 0xFFFFFFFF, false);
+
+        if (dlgNewTabNameField != null) {
+            dlgNewTabNameField.render(g, mouseX, mouseY, partialTick);
+        }
+        if (dlgNewTabOkButton != null) {
+            dlgNewTabOkButton.render(g, mouseX, mouseY, partialTick);
+        }
+        if (dlgNewTabCancelButton != null) {
+            dlgNewTabCancelButton.render(g, mouseX, mouseY, partialTick);
+        }
+    }
+
+    private void renderRenameTabDialogOnTop(GuiGraphics g, int mouseX, int mouseY, float partialTick) {
+        int pl = panelLeft(), pr = panelRight(), pt = panelTop(), pb = panelBottom();
+        int dx = renameTabDlgX, dy = renameTabDlgY, dR = dx + renameTabDlgW, dB = dy + renameTabDlgH;
+        int dim = 0x78000000;
+        g.fill(pl, pt, pr, Math.min(dy, pb), dim);
+        g.fill(pl, Math.max(dB, pt), pr, pb, dim);
+        g.fill(pl, dy, dx, dB, dim);
+        g.fill(dR, dy, pr, dB, dim);
+
+        g.fill(dx, dy, dR, dB, C_PANEL_BG & 0x00FFFFFF | 0xFF000000);
+        g.renderOutline(dx, dy, renameTabDlgW, renameTabDlgH, 0xFF505068);
+        g.drawString(this.font, "Rename Tab", dx + 12, dy + 12, 0xFFFFFFFF, false);
+
+        if (dlgRenameTabNameField != null) {
+            dlgRenameTabNameField.render(g, mouseX, mouseY, partialTick);
+        }
+        if (dlgRenameTabOkButton != null) {
+            dlgRenameTabOkButton.render(g, mouseX, mouseY, partialTick);
+        }
+        if (dlgRenameTabCancelButton != null) {
+            dlgRenameTabCancelButton.render(g, mouseX, mouseY, partialTick);
+        }
+    }
+
+    private void renderCreateProfileDialogOnTop(GuiGraphics g, int mouseX, int mouseY, float partialTick) {
+        int pl = panelLeft(), pr = panelRight(), pt = panelTop(), pb = panelBottom();
+        int dx = createProfileDlgX, dy = createProfileDlgY, dR = dx + createProfileDlgW, dB = dy + createProfileDlgH;
+        int dim = 0x78000000;
+        g.fill(pl, pt, pr, Math.min(dy, pb), dim);
+        g.fill(pl, Math.max(dB, pt), pr, pb, dim);
+        g.fill(pl, dy, dx, dB, dim);
+        g.fill(dR, dy, pr, dB, dim);
+
+        g.fill(dx, dy, dR, dB, C_PANEL_BG & 0x00FFFFFF | 0xFF000000);
+        g.renderOutline(dx, dy, createProfileDlgW, createProfileDlgH, 0xFF505068);
+        g.drawString(this.font, "Create New Profile", dx + 12, dy + 12, 0xFFFFFFFF, false);
+
+        if (dlgCreateProfileNameField != null) {
+            dlgCreateProfileNameField.render(g, mouseX, mouseY, partialTick);
+        }
+        if (dlgCreateProfileOkButton != null) {
+            dlgCreateProfileOkButton.render(g, mouseX, mouseY, partialTick);
+        }
+        if (dlgCreateProfileCancelButton != null) {
+            dlgCreateProfileCancelButton.render(g, mouseX, mouseY, partialTick);
+        }
+    }
+
+    private void renderModPrimaryColorPickerOnTop(GuiGraphics g, int mouseX, int mouseY, float partialTick) {
+        if (modColorPickerOverlay == null) {
+            return;
+        }
+        modColorPickerOverlay.layout(this.width, this.height);
+        int pl = panelLeft(), pr = panelRight(), pt = panelTop(), pb = panelBottom();
+        int dx = modColorPickerOverlay.panelLeft();
+        int dy = modColorPickerOverlay.panelTop();
+        int dR = modColorPickerOverlay.panelRight();
+        int dB = modColorPickerOverlay.panelBottom();
+        int dim = 0x78000000;
+        g.fill(pl, pt, pr, Math.min(dy, pb), dim);
+        g.fill(pl, Math.max(dB, pt), pr, pb, dim);
+        g.fill(pl, dy, dx, dB, dim);
+        g.fill(dR, dy, pr, dB, dim);
+        modColorPickerOverlay.render(g, this.font, mouseX, mouseY, partialTick);
+    }
+
+    private void renderImageWhitelistOverlayOnTop(GuiGraphics g, int mouseX, int mouseY, float partialTick) {
+        if (imageWhitelistOverlay == null) {
+            return;
+        }
+        imageWhitelistOverlay.layout(this.width, this.height);
+        int pl = panelLeft(), pr = panelRight(), pt = panelTop(), pb = panelBottom();
+        int dx = imageWhitelistOverlay.panelLeft();
+        int dy = imageWhitelistOverlay.panelTop();
+        int dR = imageWhitelistOverlay.panelRight();
+        int dB = imageWhitelistOverlay.panelBottom();
+        int dim = 0x78000000;
+        g.fill(pl, pt, pr, Math.min(dy, pb), dim);
+        g.fill(pl, Math.max(dB, pt), pr, pb, dim);
+        g.fill(pl, dy, dx, dB, dim);
+        g.fill(dR, dy, pr, dB, dim);
+        imageWhitelistOverlay.render(g, this.font, mouseX, mouseY, partialTick);
+    }
+
     private void renderSidebar(GuiGraphics g, int mouseX, int mouseY) {
         int sl = sidebarLeft(), sr = sidebarRight();
         int st = sidebarTop(),  sb = sidebarBottom();
 
-        // Sidebar background (slightly darker than panel)
-        g.fill(sl, st, sr, sb, C_SIDEBAR_BG);
+        // Sidebar background (slightly darker than panel); clipped to inner rounded rect (left corners match shell)
+        fillSidebarClipped(g, sl, st, SIDEBAR_W, sb - st, C_SIDEBAR_BG);
         // Right separator line
-        g.fill(sr, st, sr + 1, sb, C_SIDEBAR_SEP);
+        fillSidebarClipped(g, sr, st, 1, sb - st, C_SIDEBAR_SEP);
 
         // "Chat Utilities" header strip + “by Rainnny” (link)
-        g.fill(sl, st, sr, st + SIDEBAR_TITLE_H, 0xFF040408);
-        g.fill(sl, st + SIDEBAR_TITLE_H, sr, st + SIDEBAR_TITLE_H + 1, C_SIDEBAR_SEP);
+        fillSidebarClipped(g, sl, st, SIDEBAR_W, SIDEBAR_TITLE_H, 0xFF040408);
+        fillSidebarClipped(g, sl, st + SIDEBAR_TITLE_H, SIDEBAR_W, 1, C_SIDEBAR_SEP);
         int lh = this.font.lineHeight;
         int gapTitle = 1;
         int blockH = lh + gapTitle + lh;
@@ -2764,7 +5832,8 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                 && mouseY >= line2Y && mouseY < line2Y + this.font.lineHeight
                 && mouseX >= sl && mouseX < sr
                 && mouseY >= st && mouseY < st + SIDEBAR_TITLE_H;
-        int authorColor = hovAuthor ? 0xFF7EC8FF : C_ACCENT;
+        int authorHoverRgb = ModPrimaryColorUtils.brightenRgb(modGlobalAccentRgb(), 1.35f);
+        int authorColor = hovAuthor ? (0xFF000000 | authorHoverRgb) : modAccentArgb();
         g.drawString(this.font, byAuthor, nameX, line2Y, authorColor, false);
         if (hovAuthor) {
             g.fill(nameX, line2Y + this.font.lineHeight, nameX + nameW, line2Y + this.font.lineHeight + 1, authorColor);
@@ -2776,32 +5845,29 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
 
         // Footer: "+ New Profile", then "Settings"
         int footerTop = sb - 2 * SIDEBAR_FOOTER_ROW_H;
-        g.fill(sl, footerTop - 1, sr, footerTop, C_SIDEBAR_SEP);
+        fillSidebarClipped(g, sl, footerTop - 1, SIDEBAR_W, 1, C_SIDEBAR_SEP);
         int row0y = footerTop;
-        g.fill(sl, row0y, sr, row0y + SIDEBAR_FOOTER_ROW_H, 0xFF040408);
+        fillSidebarClipped(g, sl, row0y, SIDEBAR_W, SIDEBAR_FOOTER_ROW_H, 0xFF040408);
         boolean hovNew = mouseX >= sl && mouseX < sr
                 && mouseY >= row0y && mouseY < row0y + SIDEBAR_FOOTER_ROW_H;
         if (hovNew) {
-            g.fill(sl, row0y, sr, row0y + SIDEBAR_FOOTER_ROW_H, C_HOVER);
+            fillSidebarClipped(g, sl, row0y, SIDEBAR_W, SIDEBAR_FOOTER_ROW_H, C_HOVER);
         }
         g.drawString(this.font, "+ New Profile",
                 sl + SIDEBAR_FOOTER_TEXT_INSET, row0y + (SIDEBAR_FOOTER_ROW_H - 8) / 2, C_NEW_PROFILE, false);
-        g.fill(sl, row0y + SIDEBAR_FOOTER_ROW_H - 1, sr, row0y + SIDEBAR_FOOTER_ROW_H, C_SIDEBAR_SEP);
+        fillSidebarClipped(g, sl, row0y + SIDEBAR_FOOTER_ROW_H - 1, SIDEBAR_W, 1, C_SIDEBAR_SEP);
         int row1y = row0y + SIDEBAR_FOOTER_ROW_H;
-        g.fill(sl, row1y, sr, sb, 0xFF040408);
+        fillSidebarClipped(g, sl, row1y, SIDEBAR_W, sb - row1y, 0xFF040408);
         boolean settingsActive = activePanel == Panel.SETTINGS;
         boolean hovSet = mouseX >= sl && mouseX < sr && mouseY >= row1y && mouseY < sb;
         if (settingsActive) {
-            int subActiveBg = mixProfileAccentArgb(C_ACTIVE_BG, SIDEBAR_GLOBAL_ACCENT_RGB, 0.38f);
-            g.fill(sl, row1y, sr, sb, subActiveBg);
-            g.fill(sl, row1y, sl + 2, sb, sidebarTabAccentBar(SIDEBAR_GLOBAL_ACCENT_RGB));
+            int subActiveBg = mixProfileAccentArgb(C_ACTIVE_BG, modGlobalAccentRgb(), 0.38f);
+            fillSidebarClipped(g, sl, row1y, SIDEBAR_W, sb - row1y, subActiveBg);
+            fillSidebarClipped(g, sl, row1y, 2, sb - row1y, sidebarTabAccentBar(modGlobalAccentRgb()));
         } else if (hovSet) {
-            g.fill(sl, row1y, sr, sb, C_HOVER);
+            fillSidebarClipped(g, sl, row1y, SIDEBAR_W, sb - row1y, C_HOVER);
         }
-        int settingsTextColor =
-                settingsActive
-                        ? sidebarTabLabelArgb(SIDEBAR_GLOBAL_ACCENT_RGB, true)
-                        : sidebarTabLabelArgb(SIDEBAR_GLOBAL_ACCENT_RGB, false);
+        int settingsTextColor = 0xFFFFFFFF;
         g.drawString(this.font, "\u2699 Settings",
                 sl + SIDEBAR_FOOTER_TEXT_INSET, row1y + (SIDEBAR_FOOTER_ROW_H - 8) / 2, settingsTextColor, false);
 
@@ -2835,10 +5901,14 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                 if (rowY + PROFILE_ROW_H > listTop && rowY < listBottom) {
                     boolean hov = mouseX >= sl && mouseX < sr
                             && mouseY >= rowY && mouseY < rowY + PROFILE_ROW_H;
-                    if (expanded) g.fill(sl, rowY, sr, rowY + PROFILE_ROW_H, profileSelBg);
-                    if (hov)      g.fill(sl, rowY, sr, rowY + PROFILE_ROW_H, C_HOVER);
+                    if (expanded) {
+                        fillSidebarClipped(g, sl, rowY, SIDEBAR_W, PROFILE_ROW_H, profileSelBg);
+                    }
+                    if (hov) {
+                        fillSidebarClipped(g, sl, rowY, SIDEBAR_W, PROFILE_ROW_H, C_HOVER);
+                    }
                     // Bottom hairline
-                    g.fill(sl, rowY + PROFILE_ROW_H - 1, sr, rowY + PROFILE_ROW_H, 0x18FFFFFF);
+                    fillSidebarClipped(g, sl, rowY + PROFILE_ROW_H - 1, SIDEBAR_W, 1, 0x18FFFFFF);
 
                     // Favicon / item icon (16x16)
                     int iconX = sl + 6;
@@ -2878,8 +5948,15 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
 
                 // ── Sub-items ───────────────────────────────────────────────
                 if (expanded) {
-                    Panel[]  panels = {Panel.CHAT_WINDOWS, Panel.IGNORED_CHAT, Panel.CHAT_SOUNDS, Panel.EDIT_PROFILE};
-                    String[] labels = {"Chat Windows",     "Ignored Chat",     "Chat Sounds",     "Edit Profile"};
+                    Panel[] panels = {
+                        Panel.CHAT_WINDOWS, Panel.CHAT_ACTIONS, Panel.COMMAND_ALIASES, Panel.EDIT_PROFILE
+                    };
+                    String[] labels = {
+                        "Chat Windows",
+                        "Chat Actions",
+                        I18n.get("chat-utilities.panel.command_aliases"),
+                        "Edit Profile"
+                    };
                     for (int si = 0; si < panels.length; si++) {
                         Panel  sp = panels[si];
                         String sl2 = labels[si];
@@ -2893,10 +5970,16 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                             int subAccentBar = sidebarTabAccentBar(accentRgb);
                             int subTextActive = sidebarTabLabelArgb(accentRgb, true);
                             int subTextInactive = sidebarTabLabelArgb(accentRgb, false);
-                            if (active)            g.fill(sl, subY, sr, subY + SUB_ROW_H, subActiveBg);
-                            if (subHov && !active) g.fill(sl, subY, sr, subY + SUB_ROW_H, C_HOVER);
+                            if (active) {
+                                fillSidebarClipped(g, sl, subY, SIDEBAR_W, SUB_ROW_H, subActiveBg);
+                            }
+                            if (subHov && !active) {
+                                fillSidebarClipped(g, sl, subY, SIDEBAR_W, SUB_ROW_H, C_HOVER);
+                            }
                             // Left accent bar
-                            if (active) g.fill(sl, subY, sl + 2, subY + SUB_ROW_H, subAccentBar);
+                            if (active) {
+                                fillSidebarClipped(g, sl, subY, 2, SUB_ROW_H, subAccentBar);
+                            }
                             g.drawString(this.font, sl2,
                                     sl + SUB_INDENT, subY + (SUB_ROW_H - 8) / 2,
                                     active ? subTextActive : subTextInactive, false);
@@ -2906,7 +5989,7 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                     }
                     // Hairline separator after expanded group
                     if (iy > listTop && iy < listBottom) {
-                        g.fill(sl, iy, sr, iy + 1, 0x20FFFFFF);
+                        fillSidebarClipped(g, sl, iy, SIDEBAR_W, 1, 0x20FFFFFF);
                     }
                 }
             }
@@ -2943,15 +6026,32 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
 
     /** Which sound {@link EditBox} is focused for registry autocomplete (add row or an existing rule). */
     private EditBox activeSoundSuggestionField() {
-        if (activePanel != Panel.CHAT_SOUNDS) {
+        if (activePanel != Panel.CHAT_ACTIONS) {
             return null;
         }
         if (soundField != null && soundField.isFocused()) {
             return soundField;
         }
-        for (PendingMessageSoundEdit pr : pendingMessageSoundEdits) {
-            if (pr.soundBox().isFocused()) {
-                return pr.soundBox();
+        for (PendingChatEffectEdit pr : pendingChatEffectEdits) {
+            EditBox snd = pr.soundBox();
+            if (snd != null && snd.isFocused()) {
+                return snd;
+            }
+        }
+        return null;
+    }
+
+    private EditBox activeCommandSuggestionField() {
+        if (activePanel != Panel.COMMAND_ALIASES) {
+            return null;
+        }
+        if (commandAliasAddToField != null && commandAliasAddToField.isFocused()) {
+            return commandAliasAddToField;
+        }
+        for (PendingCommandAliasEdit pr : pendingCommandAliasEdits) {
+            EditBox to = pr.toBox();
+            if (to != null && to.isFocused()) {
+                return to;
             }
         }
         return null;
@@ -2975,27 +6075,142 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
         sugScroll = Mth.clamp(sugScroll, 0, maxScroll);
         sugVisibleRows = Math.min(SUGGEST_VISIBLE_ROWS, sugFiltered.size());
 
-        sugLeft  = anchor.getX();
-        sugTop   = anchor.getY() + anchor.getHeight() + 1;
-        sugWidth = Math.max(200, anchor.getWidth());
+        sugLeft = anchor.getX();
+        sugTop = anchor.getY() + anchor.getHeight() + 1;
+        int textPad = 6;
+        int widest = 0;
+        for (int i = 0; i < sugVisibleRows; i++) {
+            widest = Math.max(widest, this.font.width(sugFiltered.get(sugScroll + i)));
+        }
+        int roomRight = Math.min(contentRight() - 4, this.width - 4);
+        int maxW = Math.max(120, roomRight - sugLeft);
+        sugWidth = Mth.clamp(Math.max(widest + textPad, anchor.getWidth()), 120, maxW);
         int sugBottom = sugTop + sugVisibleRows * SUGGEST_ROW_H;
         g.fill(sugLeft - 1, sugTop - 1, sugLeft + sugWidth + 1, sugBottom + 1, 0xFF000000);
-        g.fill(sugLeft,     sugTop,     sugLeft + sugWidth,     sugBottom,     C_SIDEBAR_BG);
-        for (int i = 0; i < sugVisibleRows; i++) {
-            String line = sugFiltered.get(sugScroll + i);
-            if (line.length() > 48) line = line.substring(0, 45) + "...";
-            int ry = sugTop + i * SUGGEST_ROW_H;
-            boolean hov = mouseX >= sugLeft && mouseX < sugLeft + sugWidth
-                    && mouseY >= ry && mouseY < ry + SUGGEST_ROW_H;
-            if (hov) g.fill(sugLeft, ry, sugLeft + sugWidth, ry + SUGGEST_ROW_H, 0x336688FF);
-            g.drawString(this.font, line, sugLeft + 3, ry + 2, 0xFFFFFFFF, false);
+        g.fill(sugLeft, sugTop, sugLeft + sugWidth, sugBottom, C_SIDEBAR_BG);
+        g.enableScissor(sugLeft, sugTop, sugLeft + sugWidth, sugBottom);
+        try {
+            int innerMax = sugWidth - textPad;
+            for (int i = 0; i < sugVisibleRows; i++) {
+                String line = ellipsizeToWidth(this.font, sugFiltered.get(sugScroll + i), innerMax);
+                int ry = sugTop + i * SUGGEST_ROW_H;
+                boolean hov =
+                        mouseX >= sugLeft
+                                && mouseX < sugLeft + sugWidth
+                                && mouseY >= ry
+                                && mouseY < ry + SUGGEST_ROW_H;
+                if (hov) {
+                    g.fill(sugLeft, ry, sugLeft + sugWidth, ry + SUGGEST_ROW_H, 0x336688FF);
+                }
+                g.drawString(this.font, line, sugLeft + 3, ry + 2, 0xFFFFFFFF, false);
+            }
+        } finally {
+            g.disableScissor();
         }
+    }
+
+    private void renderCommandSuggestions(GuiGraphics g, int mouseX, int mouseY, EditBox anchor) {
+        if (anchor == null) {
+            cmdSugFiltered = List.of();
+            return;
+        }
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.getConnection() == null) {
+            cmdSugFiltered = List.of();
+            return;
+        }
+        String raw = anchor.getValue();
+        if (!Objects.equals(raw, cmdSugLastQuery)) {
+            cmdSugLastQuery = raw;
+            cmdSugScroll = 0;
+        }
+        String t = raw == null ? "" : raw.stripLeading();
+        if (!t.startsWith("/") || t.indexOf(' ') >= 0) {
+            cmdSugFiltered = List.of();
+            return;
+        }
+        String prefix = t.substring(1).toLowerCase(Locale.ROOT);
+        CommandDispatcher<ClientSuggestionProvider> disp = mc.getConnection().getCommands();
+        if (disp == null) {
+            cmdSugFiltered = List.of();
+            return;
+        }
+        List<String> out = new ArrayList<>();
+        for (CommandNode<ClientSuggestionProvider> child : disp.getRoot().getChildren()) {
+            String name = child.getName();
+            if (name != null && name.toLowerCase(Locale.ROOT).startsWith(prefix)) {
+                out.add("/" + name);
+                if (out.size() >= SUGGEST_MAX_MATCHES) {
+                    break;
+                }
+            }
+        }
+        out.sort(String::compareToIgnoreCase);
+        cmdSugFiltered = out;
+        if (cmdSugFiltered.isEmpty()) {
+            return;
+        }
+        int maxScroll = Math.max(0, cmdSugFiltered.size() - SUGGEST_VISIBLE_ROWS);
+        cmdSugScroll = Mth.clamp(cmdSugScroll, 0, maxScroll);
+        cmdSugVisibleRows = Math.min(SUGGEST_VISIBLE_ROWS, cmdSugFiltered.size());
+
+        cmdSugLeft = anchor.getX();
+        cmdSugTop = anchor.getY() + anchor.getHeight() + 1;
+        int textPad = 6;
+        int widest = 0;
+        for (int i = 0; i < cmdSugVisibleRows; i++) {
+            widest = Math.max(widest, this.font.width(cmdSugFiltered.get(cmdSugScroll + i)));
+        }
+        int roomRight = Math.min(contentRight() - 4, this.width - 4);
+        int maxW = Math.max(120, roomRight - cmdSugLeft);
+        cmdSugWidth = Mth.clamp(Math.max(widest + textPad, anchor.getWidth()), 120, maxW);
+        int sugBottom = cmdSugTop + cmdSugVisibleRows * SUGGEST_ROW_H;
+        g.fill(cmdSugLeft - 1, cmdSugTop - 1, cmdSugLeft + cmdSugWidth + 1, sugBottom + 1, 0xFF000000);
+        g.fill(cmdSugLeft, cmdSugTop, cmdSugLeft + cmdSugWidth, sugBottom, C_SIDEBAR_BG);
+        g.enableScissor(cmdSugLeft, cmdSugTop, cmdSugLeft + cmdSugWidth, sugBottom);
+        try {
+            int innerMax = cmdSugWidth - textPad;
+            for (int i = 0; i < cmdSugVisibleRows; i++) {
+                String line = ellipsizeToWidth(this.font, cmdSugFiltered.get(cmdSugScroll + i), innerMax);
+                int ry = cmdSugTop + i * SUGGEST_ROW_H;
+                boolean hov =
+                        mouseX >= cmdSugLeft
+                                && mouseX < cmdSugLeft + cmdSugWidth
+                                && mouseY >= ry
+                                && mouseY < ry + SUGGEST_ROW_H;
+                if (hov) {
+                    g.fill(cmdSugLeft, ry, cmdSugLeft + cmdSugWidth, ry + SUGGEST_ROW_H, 0x336688FF);
+                }
+                g.drawString(this.font, line, cmdSugLeft + 3, ry + 2, 0xFFFFFFFF, false);
+            }
+        } finally {
+            g.disableScissor();
+        }
+    }
+
+    private static String ellipsizeToWidth(net.minecraft.client.gui.Font font, String line, int maxW) {
+        if (line == null || line.isEmpty()) {
+            return "";
+        }
+        if (font.width(line) <= maxW) {
+            return line;
+        }
+        String ell = "…";
+        String s = line;
+        while (s.length() > 1 && font.width(s + ell) > maxW) {
+            s = s.substring(0, s.length() - 1);
+        }
+        return s + ell;
     }
 
     // ── Mouse input ───────────────────────────────────────────────────────────
 
     private boolean chatWindowsModalBlocksContentClicks() {
-        return (createWinDialogOpen || renameDialogOpen) && activePanel == Panel.CHAT_WINDOWS;
+        return (createWinDialogOpen
+                        || renameDialogOpen
+                        || newTabDialogOpen
+                        || renameTabDialogOpen)
+                && activePanel == Panel.CHAT_WINDOWS;
     }
 
     /** Bottom control strip on Chat Windows (Done at right; row includes + Create / Adjust Layout). */
@@ -3029,12 +6244,47 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
 
     @Override
     public boolean keyPressed(KeyEvent event) {
+        if (modColorPickerOverlay != null && event.key() == InputConstants.KEY_ESCAPE) {
+            if (modColorPickerOverlay.isChatHighlightMode()) {
+                clearPendingChatHighlightPickState();
+            }
+            modColorPickerOverlay = null;
+            return true;
+        }
+        if (imageWhitelistOverlay != null && event.key() == InputConstants.KEY_ESCAPE) {
+            imageWhitelistOverlay = null;
+            init();
+            return true;
+        }
+        if (imageWhitelistOverlay != null && imageWhitelistOverlay.keyPressed(event.key())) {
+            return true;
+        }
+        if (createProfileDialogOpen && event.key() == InputConstants.KEY_ESCAPE) {
+            closeCreateProfileDialog();
+            return true;
+        }
         if (renameDialogOpen && activePanel == Panel.CHAT_WINDOWS && event.key() == InputConstants.KEY_ESCAPE) {
             closeRenameWindowDialog();
             return true;
         }
         if (createWinDialogOpen && activePanel == Panel.CHAT_WINDOWS && event.key() == InputConstants.KEY_ESCAPE) {
             closeCreateWindowDialog();
+            return true;
+        }
+        if (newTabDialogOpen && activePanel == Panel.CHAT_WINDOWS && event.key() == InputConstants.KEY_ESCAPE) {
+            closeNewTabDialog();
+            return true;
+        }
+        if (renameTabDialogOpen && activePanel == Panel.CHAT_WINDOWS && event.key() == InputConstants.KEY_ESCAPE) {
+            closeRenameTabDialog();
+            return true;
+        }
+        if (activePanel == Panel.SETTINGS && rebindingFullscreenImageClick) {
+            if (event.key() == InputConstants.KEY_ESCAPE) {
+                rebindingFullscreenImageClick = false;
+                init();
+                return true;
+            }
             return true;
         }
         if (activePanel == Panel.SETTINGS && (rebindingCopyPlain || rebindingCopyFormatted)) {
@@ -3063,6 +6313,23 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
             }
             return true;
         }
+        if (activePanel == Panel.SETTINGS && rebindingChatPeekKey) {
+            if (event.key() == InputConstants.KEY_ESCAPE) {
+                rebindingChatPeekKey = false;
+                init();
+                return true;
+            }
+            InputConstants.Key newKey = keyFromKeyEvent(event);
+            if (!newKey.equals(InputConstants.UNKNOWN)) {
+                ChatUtilitiesModClient.CHAT_PEEK_KEY.setKey(newKey);
+                KeyMapping.resetMapping();
+                saveOptions();
+                rebindingChatPeekKey = false;
+                init();
+                return true;
+            }
+            return true;
+        }
         int key = event.key();
         boolean enter = key == InputConstants.KEY_RETURN || key == InputConstants.KEY_NUMPADENTER;
         if (enter) {
@@ -3086,12 +6353,34 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                 submitNewChatWindowDialog(mgr, p);
                 return true;
             }
+            if (newTabDialogOpen
+                    && activePanel == Panel.CHAT_WINDOWS
+                    && p != null
+                    && dlgNewTabNameField != null
+                    && dlgNewTabNameField.isFocused()) {
+                submitNewTabDialog(mgr, p);
+                return true;
+            }
+            if (renameTabDialogOpen
+                    && activePanel == Panel.CHAT_WINDOWS
+                    && p != null
+                    && dlgRenameTabNameField != null
+                    && dlgRenameTabNameField.isFocused()) {
+                submitRenameTabDialog(mgr, p);
+                return true;
+            }
+            if (createProfileDialogOpen
+                    && dlgCreateProfileNameField != null
+                    && dlgCreateProfileNameField.isFocused()) {
+                submitCreateProfileDialog(mgr);
+                return true;
+            }
 
             if (activePanel == Panel.CHAT_WINDOWS && p != null) {
                 for (PendingNewPattern pn : pendingNewPatterns) {
                     if (pn.box.isFocused()) {
                         try {
-                            mgr.addPattern(pn.profile(), pn.windowId(), pn.box.getValue());
+                            mgr.addPattern(pn.profile(), pn.windowId(), pn.tabId(), pn.box.getValue());
                             pn.box.setValue("");
                         } catch (PatternSyntaxException ignored) {
                         }
@@ -3102,7 +6391,8 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                 for (PendingPatternEdit pe : pendingPatternEdits) {
                     if (pe.box.isFocused()) {
                         try {
-                            mgr.setPatternAt(pe.profile(), pe.windowId(), pe.userPosition(), pe.box.getValue());
+                            mgr.setPatternAt(
+                                    pe.profile(), pe.windowId(), pe.tabId(), pe.userPosition(), pe.box.getValue());
                             init();
                         } catch (PatternSyntaxException ignored) {
                         }
@@ -3110,54 +6400,106 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                     }
                 }
             }
-            if (activePanel == Panel.IGNORED_CHAT && p != null) {
-                for (PendingIgnoreEdit pie : pendingIgnoreEdits) {
-                    if (pie.box().isFocused()) {
+            if (activePanel == Panel.CHAT_ACTIONS && p != null) {
+                for (PendingChatGroupPattern pr : pendingChatGroupPatterns) {
+                    if (pr.patternBox().isFocused()) {
                         try {
-                            mgr.setIgnorePatternAt(pie.profile(), pie.listIndex(), pie.box().getValue());
+                            mgr.setChatActionGroupPattern(p, pr.groupIndex(), pr.patternBox().getValue());
                             init();
-                        } catch (PatternSyntaxException ignored) {
+                        } catch (IllegalArgumentException ignored) {
                         }
                         return true;
                     }
                 }
-            }
-            if (activePanel == Panel.IGNORED_CHAT && p != null
-                    && newIgnoreField != null && newIgnoreField.isFocused()) {
-                try {
-                    mgr.addIgnorePattern(p, newIgnoreField.getValue());
-                    newIgnoreField.setValue("");
-                } catch (PatternSyntaxException ignored) {
-                }
-                init();
-                return true;
-            }
-            if (activePanel == Panel.CHAT_SOUNDS && p != null) {
-                for (PendingMessageSoundEdit pr : pendingMessageSoundEdits) {
-                    if (pr.patternBox().isFocused() || pr.soundBox().isFocused()) {
+                for (PendingChatEffectEdit pr : pendingChatEffectEdits) {
+                    EditBox sndBox = pr.soundBox();
+                    EditBox tgtBox = pr.targetBox();
+                    if ((sndBox != null && sndBox.isFocused()) || (tgtBox != null && tgtBox.isFocused())) {
+                        ChatActionEffect.Type t =
+                                p.getChatActionGroups()
+                                        .get(pr.groupIndex())
+                                        .getEffects()
+                                        .get(pr.effectIndex())
+                                        .getType();
                         try {
-                            mgr.setMessageSoundAt(
+                            mgr.setChatActionEffectAt(
                                     p,
-                                    pr.listIndex(),
-                                    pr.patternBox().getValue(),
-                                    pr.soundBox().getValue());
+                                    pr.groupIndex(),
+                                    pr.effectIndex(),
+                                    t,
+                                    sndBox != null && sndBox.isFocused()
+                                            ? sndBox.getValue()
+                                            : tgtBox != null
+                                                    ? tgtBox.getValue()
+                                                    : "");
                             init();
-                        } catch (PatternSyntaxException ignored) {
                         } catch (IllegalArgumentException ignored) {
                         }
                         return true;
                     }
                 }
             }
-            if (activePanel == Panel.CHAT_SOUNDS && p != null
-                    && patternField != null && soundField != null
-                    && (patternField.isFocused() || soundField.isFocused())
-                    && !patternField.getValue().strip().isEmpty()
-                    && !soundField.getValue().strip().isEmpty()) {
+            if (activePanel == Panel.CHAT_ACTIONS
+                    && p != null
+                    && patternField != null
+                    && (patternField.isFocused() || (soundField != null && soundField.isFocused()))
+                    && !patternField.getValue().strip().isEmpty()) {
                 try {
-                    mgr.addMessageSound(p, patternField.getValue(), soundField.getValue());
+                    if (chatActionNewType == ChatActionEffect.Type.COLOR_HIGHLIGHT) {
+                        mgr.addChatAction(
+                                p,
+                                chatActionNewType,
+                                patternField.getValue(),
+                                "",
+                                chatActionNewHighlightRgb,
+                                chatActionNewHlBold,
+                                chatActionNewHlItalic,
+                                chatActionNewHlUnderlined,
+                                chatActionNewHlStrikethrough,
+                                chatActionNewHlObfuscated);
+                    } else {
+                        mgr.addChatAction(
+                                p,
+                                chatActionNewType,
+                                patternField.getValue(),
+                                soundField != null ? soundField.getValue() : "");
+                    }
+                    chatActionNewPatternDraft = "";
                     patternField.setValue("");
+                    if (soundField != null) {
+                        soundField.setValue("");
+                    }
                 } catch (IllegalArgumentException ignored) {
+                }
+                init();
+                return true;
+            }
+            if (activePanel == Panel.COMMAND_ALIASES && p != null) {
+                for (PendingCommandAliasEdit pr : pendingCommandAliasEdits) {
+                    if (pr.fromBox().isFocused() || pr.toBox().isFocused()) {
+                        mgr.updateCommandAliasAt(
+                                p,
+                                pr.index(),
+                                stripSlashCommand(pr.fromBox().getValue()),
+                                stripSlashCommand(pr.toBox().getValue()));
+                        init();
+                        return true;
+                    }
+                }
+            }
+            if (activePanel == Panel.COMMAND_ALIASES
+                    && p != null
+                    && commandAliasAddFromField != null
+                    && commandAliasAddToField != null
+                    && (commandAliasAddFromField.isFocused() || commandAliasAddToField.isFocused())
+                    && !commandAliasAddFromField.getValue().strip().isEmpty()
+                    && !commandAliasAddToField.getValue().strip().isEmpty()) {
+                if (mgr.addCommandAlias(
+                        p,
+                        stripSlashCommand(commandAliasAddFromField.getValue()),
+                        stripSlashCommand(commandAliasAddToField.getValue()))) {
+                    commandAliasNewFromDraft = "";
+                    commandAliasNewToDraft = "";
                 }
                 init();
                 return true;
@@ -3180,6 +6522,106 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
 
     @Override
     public boolean mouseClicked(MouseButtonEvent event, boolean doubleClick) {
+        if (chatActionTypeDropdownOpen && activePanel == Panel.CHAT_ACTIONS) {
+            double mx = event.x();
+            double my = event.y();
+            if (event.button() == 0) {
+                int x = chatActionTypeDropX;
+                int y = chatActionTypeDropY;
+                int w = chatActionTypeDropW;
+                int h = chatActionTypeDropH;
+                boolean inside = mx >= x && mx < x + w && my >= y && my < y + h;
+                if (!inside) {
+                    clearPendingChatActionTypePickState();
+                    return true;
+                }
+                int rowH = 18;
+                int idx = (int) ((my - y) / rowH);
+                ChatActionEffect.Type[] types = ChatActionEffect.Type.values();
+                if (idx >= 0 && idx < types.length) {
+                    ChatActionEffect.Type picked = types[idx];
+                    ChatUtilitiesManager mgr = ChatUtilitiesManager.get();
+                    ServerProfile p =
+                            chatActionTypePickProfileId != null
+                                    ? mgr.getProfile(chatActionTypePickProfileId)
+                                    : profile();
+                    if (p != null) {
+                        if (chatActionTypePickGroupIndex < 0 || chatActionTypePickEffectIndex < 0) {
+                            chatActionNewType = picked;
+                        } else {
+                            ChatActionEffect eff =
+                                    p.getChatActionGroups()
+                                            .get(chatActionTypePickGroupIndex)
+                                            .getEffects()
+                                            .get(chatActionTypePickEffectIndex);
+                            String snd = eff != null ? eff.getSoundId() : "";
+                            try {
+                                mgr.setChatActionEffectAt(
+                                        p,
+                                        chatActionTypePickGroupIndex,
+                                        chatActionTypePickEffectIndex,
+                                        picked,
+                                        snd);
+                            } catch (IllegalArgumentException ignored) {
+                            }
+                        }
+                    }
+                    clearPendingChatActionTypePickState();
+                    init();
+                    return true;
+                }
+            }
+            return true;
+        }
+        if (modColorPickerOverlay != null) {
+            modColorPickerOverlay.layout(this.width, this.height);
+            double mx = event.x();
+            double my = event.y();
+            if (event.button() == 0) {
+                if (modColorPickerOverlay.isDoneButton(mx, my)) {
+                    ModPrimaryColorPickerOverlay p = modColorPickerOverlay;
+                    modColorPickerOverlay = null;
+                    p.applyAndPersist(this::init);
+                    return true;
+                }
+                if (modColorPickerOverlay.isCancelButton(mx, my)) {
+                    if (modColorPickerOverlay.isChatHighlightMode()) {
+                        clearPendingChatHighlightPickState();
+                    }
+                    modColorPickerOverlay = null;
+                    return true;
+                }
+                if (!modColorPickerOverlay.contains((int) mx, (int) my)) {
+                    if (modColorPickerOverlay.isChatHighlightMode()) {
+                        clearPendingChatHighlightPickState();
+                    }
+                    modColorPickerOverlay = null;
+                    return true;
+                }
+                modColorPickerOverlay.mouseClicked(mx, my, 0);
+            }
+            return true;
+        }
+        if (imageWhitelistOverlay != null) {
+            imageWhitelistOverlay.layout(this.width, this.height);
+            double mx = event.x();
+            double my = event.y();
+            if (event.button() == 0) {
+                if (!imageWhitelistOverlay.contains((int) mx, (int) my)) {
+                    imageWhitelistOverlay = null;
+                    init();
+                    return true;
+                }
+                // The overlay renders its own EditBox but we bypass Screen's normal widget routing here,
+                // so we must replicate focus bookkeeping to make the field clickable/typable.
+                if (dispatchModalWidgetClick(imageWhitelistOverlay.getAddField(), event, doubleClick)) {
+                    return true;
+                }
+                imageWhitelistOverlay.mouseClicked(event, doubleClick);
+                return true;
+            }
+            return true;
+        }
         if ((rebindingCopyPlain || rebindingCopyFormatted) && activePanel == Panel.SETTINGS) {
             Minecraft mc = Minecraft.getInstance();
             long win = mc.getWindow().handle();
@@ -3205,6 +6647,25 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
             init();
             return true;
         }
+        if (rebindingFullscreenImageClick && activePanel == Panel.SETTINGS) {
+            Minecraft mc = Minecraft.getInstance();
+            long win = mc.getWindow().handle();
+            boolean control =
+                    GLFW.glfwGetKey(win, GLFW.GLFW_KEY_LEFT_CONTROL) == GLFW.GLFW_PRESS
+                            || GLFW.glfwGetKey(win, GLFW.GLFW_KEY_RIGHT_CONTROL) == GLFW.GLFW_PRESS;
+            boolean shift =
+                    GLFW.glfwGetKey(win, GLFW.GLFW_KEY_LEFT_SHIFT) == GLFW.GLFW_PRESS
+                            || GLFW.glfwGetKey(win, GLFW.GLFW_KEY_RIGHT_SHIFT) == GLFW.GLFW_PRESS;
+            boolean alt =
+                    GLFW.glfwGetKey(win, GLFW.GLFW_KEY_LEFT_ALT) == GLFW.GLFW_PRESS
+                            || GLFW.glfwGetKey(win, GLFW.GLFW_KEY_RIGHT_ALT) == GLFW.GLFW_PRESS;
+            ChatUtilitiesClientOptions.ClickMouseBinding nb =
+                    new ChatUtilitiesClientOptions.ClickMouseBinding(event.button(), control, shift, alt);
+            ChatUtilitiesClientOptions.setFullscreenImagePreviewClickBinding(nb);
+            rebindingFullscreenImageClick = false;
+            init();
+            return true;
+        }
         if (rebindingOpenMenuKey && activePanel == Panel.SETTINGS) {
             boolean handled = super.mouseClicked(event, doubleClick);
             if (handled) {
@@ -3219,6 +6680,70 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
             init();
             return true;
         }
+        if (rebindingChatPeekKey && activePanel == Panel.SETTINGS) {
+            boolean handled = super.mouseClicked(event, doubleClick);
+            if (handled) {
+                rebindingChatPeekKey = false;
+                return true;
+            }
+            ChatUtilitiesModClient.CHAT_PEEK_KEY.setKey(
+                    InputConstants.Type.MOUSE.getOrCreate(event.button()));
+            KeyMapping.resetMapping();
+            saveOptions();
+            rebindingChatPeekKey = false;
+            init();
+            return true;
+        }
+        if (createProfileDialogOpen) {
+            if (event.button() == 0) {
+                int dx = createProfileDlgX;
+                int dy = createProfileDlgY;
+                int dr = dx + createProfileDlgW;
+                int db = dy + createProfileDlgH;
+                int ix = (int) event.x();
+                int iy = (int) event.y();
+                if (ix < dx || ix >= dr || iy < dy || iy >= db) {
+                    createProfileDialogOpen = false;
+                    init();
+                    return true;
+                }
+            }
+            if (dispatchModalWidgetClick(dlgCreateProfileNameField, event, doubleClick)) {
+                return true;
+            }
+            if (dispatchModalWidgetClick(dlgCreateProfileOkButton, event, doubleClick)) {
+                return true;
+            }
+            if (dispatchModalWidgetClick(dlgCreateProfileCancelButton, event, doubleClick)) {
+                return true;
+            }
+            return true;
+        }
+        if (importExportChoiceDialogOpen && activePanel == Panel.SETTINGS) {
+            if (event.button() == 0) {
+                int dx = importExportDlgX;
+                int dy = importExportDlgY;
+                int dr = dx + importExportDlgW;
+                int db = dy + importExportDlgH;
+                int ix = (int) event.x();
+                int iy = (int) event.y();
+                if (ix < dx || ix >= dr || iy < dy || iy >= db) {
+                    importExportChoiceDialogOpen = false;
+                    init();
+                    return true;
+                }
+            }
+            if (dispatchModalWidgetClick(importExportProfilesOnlyBtn, event, doubleClick)) {
+                return true;
+            }
+            if (dispatchModalWidgetClick(importExportProfilesAndSettingsBtn, event, doubleClick)) {
+                return true;
+            }
+            if (dispatchModalWidgetClick(importExportCancelBtn, event, doubleClick)) {
+                return true;
+            }
+            return true;
+        }
         if (chatWindowsModalBlocksContentClicks()) {
             double mx = event.x();
             double my = event.y();
@@ -3226,6 +6751,39 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
             if (!inSidebar) {
                 if (isChatWindowsFooterBar(mx, my)) {
                     return super.mouseClicked(event, doubleClick);
+                }
+                if (event.button() == 0) {
+                    int ix = (int) mx;
+                    int iy = (int) my;
+                    if (renameDialogOpen) {
+                        int dx = renameDlgX, dy = renameDlgY, dr = dx + renameDlgW, db = dy + renameDlgH;
+                        if (ix < dx || ix >= dr || iy < dy || iy >= db) {
+                            closeRenameWindowDialog();
+                            init();
+                            return true;
+                        }
+                    } else if (createWinDialogOpen) {
+                        int dx = createDlgX, dy = createDlgY, dr = dx + createDlgW, db = dy + createDlgH;
+                        if (ix < dx || ix >= dr || iy < dy || iy >= db) {
+                            closeCreateWindowDialog();
+                            init();
+                            return true;
+                        }
+                    } else if (renameTabDialogOpen) {
+                        int dx = renameTabDlgX, dy = renameTabDlgY, dr = dx + renameTabDlgW, db = dy + renameTabDlgH;
+                        if (ix < dx || ix >= dr || iy < dy || iy >= db) {
+                            closeRenameTabDialog();
+                            init();
+                            return true;
+                        }
+                    } else if (newTabDialogOpen) {
+                        int dx = newTabDlgX, dy = newTabDlgY, dr = dx + newTabDlgW, db = dy + newTabDlgH;
+                        if (ix < dx || ix >= dr || iy < dy || iy >= db) {
+                            closeNewTabDialog();
+                            init();
+                            return true;
+                        }
+                    }
                 }
                 if (renameDialogOpen) {
                     if (dispatchModalWidgetClick(dlgRenameIdField, event, doubleClick)) {
@@ -3237,7 +6795,7 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                     if (dispatchModalWidgetClick(dlgRenameCancelButton, event, doubleClick)) {
                         return true;
                     }
-                } else {
+                } else if (createWinDialogOpen) {
                     if (dispatchModalWidgetClick(dlgWinIdField, event, doubleClick)) {
                         return true;
                     }
@@ -3248,6 +6806,26 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                         return true;
                     }
                     if (dispatchModalWidgetClick(dlgCancelButton, event, doubleClick)) {
+                        return true;
+                    }
+                } else if (renameTabDialogOpen) {
+                    if (dispatchModalWidgetClick(dlgRenameTabNameField, event, doubleClick)) {
+                        return true;
+                    }
+                    if (dispatchModalWidgetClick(dlgRenameTabOkButton, event, doubleClick)) {
+                        return true;
+                    }
+                    if (dispatchModalWidgetClick(dlgRenameTabCancelButton, event, doubleClick)) {
+                        return true;
+                    }
+                } else if (newTabDialogOpen) {
+                    if (dispatchModalWidgetClick(dlgNewTabNameField, event, doubleClick)) {
+                        return true;
+                    }
+                    if (dispatchModalWidgetClick(dlgNewTabOkButton, event, doubleClick)) {
+                        return true;
+                    }
+                    if (dispatchModalWidgetClick(dlgNewTabCancelButton, event, doubleClick)) {
                         return true;
                     }
                 }
@@ -3261,7 +6839,7 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
             double mx = event.x();
             double my = event.y();
 
-            if (activePanel == Panel.CHAT_SOUNDS) {
+            if (activePanel == Panel.CHAT_ACTIONS) {
                 EditBox soundAnchor = activeSoundSuggestionField();
                 if (soundAnchor != null) {
                     boolean inAnchor =
@@ -3285,7 +6863,7 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
 
             // Sound suggestion click (add form or rule row sound field)
             EditBox soundSugTarget = activeSoundSuggestionField();
-            if (activePanel == Panel.CHAT_SOUNDS && soundSugTarget != null && !sugFiltered.isEmpty()) {
+            if (activePanel == Panel.CHAT_ACTIONS && soundSugTarget != null && !sugFiltered.isEmpty()) {
                 if (mx >= sugLeft && mx < sugLeft + sugWidth
                         && my >= sugTop && my < sugTop + sugVisibleRows * SUGGEST_ROW_H) {
                     int row = (int) ((my - sugTop) / SUGGEST_ROW_H);
@@ -3293,6 +6871,23 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                     if (row >= 0 && row < sugVisibleRows && idx >= 0 && idx < sugFiltered.size()) {
                         soundSugTarget.setValue(sugFiltered.get(idx));
                         soundSugTarget.moveCursorToEnd(false);
+                        return true;
+                    }
+                }
+            }
+
+            // Command suggestion click (Command Aliases → target command field)
+            EditBox cmdSugTarget = activeCommandSuggestionField();
+            if (activePanel == Panel.COMMAND_ALIASES && cmdSugTarget != null && !cmdSugFiltered.isEmpty()) {
+                if (mx >= cmdSugLeft
+                        && mx < cmdSugLeft + cmdSugWidth
+                        && my >= cmdSugTop
+                        && my < cmdSugTop + cmdSugVisibleRows * SUGGEST_ROW_H) {
+                    int row = (int) ((my - cmdSugTop) / SUGGEST_ROW_H);
+                    int idx = cmdSugScroll + row;
+                    if (row >= 0 && row < cmdSugVisibleRows && idx >= 0 && idx < cmdSugFiltered.size()) {
+                        cmdSugTarget.setValue(cmdSugFiltered.get(idx));
+                        cmdSugTarget.moveCursorToEnd(false);
                         return true;
                     }
                 }
@@ -3319,12 +6914,7 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                 int footerTop = sidebarBottom() - 2 * SIDEBAR_FOOTER_ROW_H;
                 if (my >= footerTop && my < footerTop + SIDEBAR_FOOTER_ROW_H) {
                     playUiClick();
-                    ServerProfile np = ChatUtilitiesManager.get()
-                            .createProfileForCurrentServer("New Profile");
-                    expandedProfileIds.add(np.getId());
-                    selectedProfileId = np.getId();
-                    activePanel = Panel.EDIT_PROFILE;
-                    serverScroll = 0;
+                    createProfileDialogOpen = true;
                     init();
                     return true;
                 }
@@ -3362,16 +6952,194 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                 return true;
             }
         }
-        return super.mouseClicked(event, doubleClick);
+        if (event.button() == 0 && tryThinScrollbarMouseDown(event.x(), event.y())) {
+            return true;
+        }
+        if (activePanel == Panel.CHAT_WINDOWS && event.button() == 0) {
+            double mx = event.x();
+            double my = event.y();
+            for (MenuTabRect rc : menuTabRects) {
+                if (mx >= rc.l() && mx < rc.r() && my >= rc.t() && my < rc.b()) {
+                    menuDragWindowId = rc.windowId();
+                    menuDragTabId = rc.tabId();
+                    menuDragFromIndex = rc.tabIndex();
+                    menuDragHoverIndex = rc.tabIndex();
+                    menuDragPressX = mx;
+                    menuDragPressY = my;
+                    menuDragDidMove = false;
+                    break;
+                }
+            }
+            if (menuDragWindowId != null) {
+                // Prevent the underlying tab widget click from firing; we'll treat release-without-drag as a click.
+                return true;
+            }
+        }
+        boolean handled = super.mouseClicked(event, doubleClick);
+        if (handled) {
+            return true;
+        }
+        if (activePanel == Panel.CHAT_WINDOWS
+                && event.button() == 0
+                && !chatWindowsModalBlocksContentClicks()) {
+            double mx = event.x();
+            double my = event.y();
+            int vt = chatWindowsScrollViewportTop();
+            int vb = chatWindowsScrollViewportBottom();
+            boolean inViewport =
+                    mx >= contentLeft()
+                            && mx < contentRight() - scrollbarReserve(chatWindowsShowScrollbar)
+                            && my >= vt
+                            && my < vb;
+            if (inViewport) {
+                boolean onWidget = false;
+                for (GuiEventListener child : this.children()) {
+                    if (child instanceof AbstractWidget w && w.visible && w.isMouseOver(mx, my)) {
+                        onWidget = true;
+                        break;
+                    }
+                }
+                if (!onWidget) {
+                    chatWindowsContentDragScroll = true;
+                    chatWindowsContentDragAnchorMy = (int) my;
+                    chatWindowsContentDragAnchorScroll = chatWindowsListScrollPixels;
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    @Override
+    public boolean mouseDragged(MouseButtonEvent event, double dx, double dy) {
+        if (activePanel == Panel.CHAT_WINDOWS && event.button() == 0 && chatWindowsContentDragScroll) {
+            int max = chatWindowsMaxContentScroll();
+            if (max > 0) {
+                int my = (int) event.y();
+                int delta = my - chatWindowsContentDragAnchorMy;
+                int next = Mth.clamp(chatWindowsContentDragAnchorScroll - delta, 0, max);
+                if (next != chatWindowsListScrollPixels) {
+                    chatWindowsListScrollPixels = next;
+                    relayoutChatWindowsDuringContentDragScroll();
+                }
+            }
+            return true;
+        }
+        if (activePanel == Panel.CHAT_WINDOWS
+                && event.button() == 0
+                && menuDragWindowId != null
+                && menuDragTabId != null
+                && menuDragFromIndex >= 0) {
+            double mx = event.x();
+            double my = event.y();
+            if (!menuDragDidMove) {
+                double ddx = mx - menuDragPressX;
+                double ddy = my - menuDragPressY;
+                if (ddx * ddx + ddy * ddy >= 4.0) { // 2px threshold
+                    menuDragDidMove = true;
+                }
+            }
+            int hover = -1;
+            for (MenuTabRect rc : menuTabRects) {
+                if (!rc.windowId().equals(menuDragWindowId)) {
+                    continue;
+                }
+                if (mx >= rc.l() && mx < rc.r() && my >= rc.t() && my < rc.b()) {
+                    hover = rc.tabIndex();
+                    break;
+                }
+            }
+            menuDragHoverIndex = hover;
+            if (menuDragDidMove && hover >= 0 && hover != menuDragFromIndex) {
+                ServerProfile p = profile();
+                if (p != null) {
+                    ChatWindow w = p.getWindow(menuDragWindowId);
+                    if (w != null && w.getTabCount() > 1) {
+                        boolean moved = w.moveTab(menuDragFromIndex, hover);
+                        if (moved) {
+                            // Keep dragging the same tab after mutation.
+                            int now = -1;
+                            if (menuDragTabId != null) {
+                                for (int ti = 0; ti < w.getTabs().size(); ti++) {
+                                    ChatWindowTab t = w.getTabs().get(ti);
+                                    if (t != null && menuDragTabId.equals(t.getId())) {
+                                        now = ti;
+                                        break;
+                                    }
+                                }
+                            }
+                            menuDragFromIndex = now >= 0 ? now : hover;
+                            menuDragHoverIndex = menuDragFromIndex;
+                            relayoutChatWindowsDuringMenuTabDrag();
+                        }
+                    }
+                }
+            }
+            return true;
+        }
+        return super.mouseDragged(event, dx, dy);
+    }
+
+    @Override
+    public boolean mouseReleased(MouseButtonEvent event) {
+        if (event.button() == 0 && chatWindowsContentDragScroll) {
+            chatWindowsContentDragScroll = false;
+            chatWindowsContentDragAnchorMy = 0;
+            chatWindowsContentDragAnchorScroll = 0;
+            return true;
+        }
+        if (event.button() == 0
+                && menuDragWindowId != null
+                && menuDragTabId != null
+                && menuDragFromIndex >= 0) {
+            try {
+                ServerProfile p = profile();
+                if (activePanel == Panel.CHAT_WINDOWS && p != null) {
+                    ChatWindow w = p.getWindow(menuDragWindowId);
+                    if (w != null && w.getTabCount() > 1) {
+                        int from = menuDragFromIndex;
+                        int to = menuDragHoverIndex;
+                        if (menuDragDidMove) {
+                            ChatUtilitiesManager.get().save();
+                            init();
+                        } else if (!menuDragDidMove) {
+                            // Click: select tab without reordering.
+                            menuWindowTabId.put(menuDragWindowId, menuDragTabId);
+                            init();
+                        }
+                    }
+                }
+            } finally {
+                menuDragWindowId = null;
+                menuDragTabId = null;
+                menuDragFromIndex = -1;
+                menuDragHoverIndex = -1;
+                menuDragPressX = 0;
+                menuDragPressY = 0;
+                menuDragDidMove = false;
+            }
+            return true;
+        }
+        return super.mouseReleased(event);
     }
 
     @Override
     public boolean mouseScrolled(
             double mouseX, double mouseY, double horizontalAmount, double verticalAmount) {
+        if (modColorPickerOverlay != null) {
+            return true;
+        }
+        if (imageWhitelistOverlay != null) {
+            imageWhitelistOverlay.layout(this.width, this.height);
+            if (imageWhitelistOverlay.mouseScrolled(mouseX, mouseY, horizontalAmount, verticalAmount)) {
+                return true;
+            }
+            return true;
+        }
         if (chatWindowsModalBlocksContentClicks() && mouseX >= sidebarRight()) {
             return true;
         }
-        if (activePanel == Panel.CHAT_SOUNDS && activeSoundSuggestionField() != null
+        if (activePanel == Panel.CHAT_ACTIONS && activeSoundSuggestionField() != null
                 && !sugFiltered.isEmpty()) {
             int maxScroll = Math.max(0, sugFiltered.size() - SUGGEST_VISIBLE_ROWS);
             if (maxScroll > 0) {
@@ -3384,23 +7152,33 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
                 }
             }
         }
+        if (activePanel == Panel.COMMAND_ALIASES && activeCommandSuggestionField() != null
+                && !cmdSugFiltered.isEmpty()) {
+            int maxScroll = Math.max(0, cmdSugFiltered.size() - SUGGEST_VISIBLE_ROWS);
+            if (maxScroll > 0) {
+                int visH = cmdSugVisibleRows * SUGGEST_ROW_H;
+                if (mouseX >= cmdSugLeft && mouseX < cmdSugLeft + cmdSugWidth
+                        && mouseY >= cmdSugTop && mouseY < cmdSugTop + visH) {
+                    int step = verticalAmount > 0 ? -1 : 1;
+                    cmdSugScroll = Mth.clamp(cmdSugScroll + step, 0, maxScroll);
+                    return true;
+                }
+            }
+        }
         if (activePanel == Panel.CHAT_WINDOWS && mouseX >= contentLeft() && mouseX <= contentRight()) {
-            int listEnd = footerY() - WIN_LIST_FOOTER_GAP;
-            if (mouseY >= bodyY() && mouseY < listEnd) {
-                ServerProfile p = profile();
-                if (p != null) {
-                    List<String> winIds = validWindowIds(p);
-                    int maxWin = maxChatWindowListScroll(p, winIds, listEnd);
-                    if (maxWin > 0) {
-                        int step = verticalAmount > 0 ? -1 : 1;
-                        int ns = Mth.clamp(winScroll + step, 0, maxWin);
-                        if (ns != winScroll) {
-                            winScroll = ns;
-                            init();
-                            return true;
-                        }
+            int vt = chatWindowsScrollViewportTop();
+            int vb = chatWindowsScrollViewportBottom();
+            if (mouseY >= vt && mouseY < vb) {
+                int max = chatWindowsMaxContentScroll();
+                if (max > 0) {
+                    int step = verticalAmount > 0 ? -SETTINGS_SCROLL_STEP : SETTINGS_SCROLL_STEP;
+                    int next = Mth.clamp(chatWindowsListScrollPixels + step, 0, max);
+                    if (next != chatWindowsListScrollPixels) {
+                        chatWindowsListScrollPixels = next;
+                        init();
                     }
                 }
+                return true;
             }
         }
         if (activePanel == Panel.SETTINGS
@@ -3434,8 +7212,20 @@ public class ChatUtilitiesRootScreen extends Screen implements ProfileWorkflowSc
 
     @Override
     public void removed() {
+        ServerProfile p = profile();
+        if (activePanel == Panel.CHAT_WINDOWS && p != null) {
+            persistMenuExpandedChatWindows(p);
+        }
         super.removed();
-        ChatUtilitiesClientOptions.setLastMenuState(selectedProfileId, activePanel.name());
+        ChatUtilitiesClientOptions.setLastMenuState(
+                selectedProfileId,
+                activePanel.name(),
+                serverScroll,
+                winScroll,
+                actionScroll,
+                aliasScroll,
+                settingsContentScroll,
+                chatWindowsListScrollPixels);
     }
 
     @Override

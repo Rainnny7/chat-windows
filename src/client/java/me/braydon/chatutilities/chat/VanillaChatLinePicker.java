@@ -1,8 +1,10 @@
 package me.braydon.chatutilities.chat;
 
 import net.minecraft.client.GuiMessage;
+import me.braydon.chatutilities.client.ChatUtilitiesClientOptions;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.components.ChatComponent;
+import net.minecraft.client.gui.screens.ChatScreen;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.util.FormattedCharSequence;
@@ -14,6 +16,7 @@ import org.jspecify.annotations.Nullable;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
@@ -104,6 +107,49 @@ public final class VanillaChatLinePicker {
         return entryComponentForLine(chat, state.pickedLine);
     }
 
+    /** Same hit test as {@link #pickLineAt}, but returns the wrapped {@link GuiMessage.Line} under the cursor. */
+    public static Optional<GuiMessage.Line> pickGuiLineAt(Minecraft mc, int mouseX, int mouseY) {
+        ChatComponent chat = mc.gui.getChat();
+        if (chat.isChatHidden()) {
+            return Optional.empty();
+        }
+        ChatComponent.AlphaCalculator alpha = ChatComponent.AlphaCalculator.FULLY_VISIBLE;
+        PickerState state = new PickerState(mc, chat, mouseX, mouseY, guiScaledHeight(mc));
+        Object consumer =
+                Proxy.newProxyInstance(
+                        ChatComponent.LineConsumer.class.getClassLoader(),
+                        new Class<?>[] {ChatComponent.LineConsumer.class},
+                        new LineConsumerHandler());
+        PICK_CAPTURE.set(state);
+        try {
+            FOR_EACH_LINE.invoke(chat, alpha, consumer);
+        } catch (ReflectiveOperationException e) {
+            return Optional.empty();
+        } finally {
+            PICK_CAPTURE.set(null);
+        }
+        return Optional.ofNullable(state.pickedLine);
+    }
+
+    /**
+     * Visible chat lines for the current {@link ChatComponent#getChatScrollbarPos()} and focused layout, in the same
+     * order as {@link ChatComponent#forEachLine} invokes the consumer.
+     */
+    public static List<GuiMessage.Line> collectVisibleGuiLines(ChatComponent chat) {
+        List<GuiMessage.Line> out = new ArrayList<>();
+        ChatComponent.AlphaCalculator alpha = ChatComponent.AlphaCalculator.FULLY_VISIBLE;
+        Object consumer =
+                Proxy.newProxyInstance(
+                        ChatComponent.LineConsumer.class.getClassLoader(),
+                        new Class<?>[] {ChatComponent.LineConsumer.class},
+                        new LinesCollectHandler(out));
+        try {
+            FOR_EACH_LINE.invoke(chat, alpha, consumer);
+        } catch (ReflectiveOperationException ignored) {
+        }
+        return out;
+    }
+
     /** No-op consumer; real work happens in {@link #notifyLineDuringPick} via mixin redirect. */
     private static final class LineConsumerHandler implements InvocationHandler {
         @Override
@@ -121,6 +167,73 @@ public final class VanillaChatLinePicker {
         }
     }
 
+    private static final class LinesCollectHandler implements InvocationHandler {
+        private final List<GuiMessage.Line> out;
+
+        LinesCollectHandler(List<GuiMessage.Line> out) {
+            this.out = out;
+        }
+
+        @Override
+        public @Nullable Object invoke(Object proxy, Method method, @Nullable Object[] args) {
+            if (method.getDeclaringClass() == Object.class) {
+                return switch (method.getName()) {
+                    case "equals" ->
+                            args != null && args.length == 1 && proxy == args[0];
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "toString" -> "VanillaChatLinePicker$LinesCollectHandler";
+                    default -> null;
+                };
+            }
+            if ("accept".equals(method.getName())
+                    && args != null
+                    && args.length >= 1
+                    && args[0] instanceof GuiMessage.Line ln) {
+                float op = 1f;
+                if (args.length >= 3 && args[2] instanceof Number num) {
+                    op = num.floatValue();
+                }
+                if (op > 0.01f) {
+                    out.add(ln);
+                }
+            }
+            return null;
+        }
+    }
+
+    /** Hit on a wrapped chat row with X offset into {@link GuiMessage.Line#content()} for style picking. */
+    public record LineHit(GuiMessage.Line line, int relXInContent) {}
+
+    /**
+     * Same layout as {@link #pickGuiLineAt}, plus horizontal offset along the row for
+     * {@link me.braydon.chatutilities.chat.ChatWindowClickHandler#styleAtRelativeX hit-testing}.
+     */
+    public static Optional<LineHit> pickLineHitAt(Minecraft mc, int mouseX, int mouseY) {
+        ChatComponent chat = mc.gui.getChat();
+        if (chat.isChatHidden()) {
+            return Optional.empty();
+        }
+        ChatComponent.AlphaCalculator alpha = ChatComponent.AlphaCalculator.FULLY_VISIBLE;
+        PickerState state = new PickerState(mc, chat, mouseX, mouseY, guiScaledHeight(mc));
+        Object consumer =
+                Proxy.newProxyInstance(
+                        ChatComponent.LineConsumer.class.getClassLoader(),
+                        new Class<?>[] {ChatComponent.LineConsumer.class},
+                        new LineConsumerHandler());
+        PICK_CAPTURE.set(state);
+        try {
+            FOR_EACH_LINE.invoke(chat, alpha, consumer);
+        } catch (ReflectiveOperationException e) {
+            return Optional.empty();
+        } finally {
+            PICK_CAPTURE.set(null);
+        }
+        if (state.pickedLine == null || state.pickedRelX < 0) {
+            return Optional.empty();
+        }
+        return Optional.of(new LineHit(state.pickedLine, state.pickedRelX));
+    }
+
     private static final class PickerState {
         /** Mouse in chat-local space (matches {@link ChatComponent} pose after updatePose). */
         private final float localMouseX;
@@ -131,7 +244,11 @@ public final class VanillaChatLinePicker {
         private final int entryHeight;
         /** {@code ceil(getWidth() / scale)}; background fill uses x in {@code [-4, this+8)}. */
         private final int rowInnerWidth;
+        /** Extra width in chat-local X so the cursor can sit on the Jump chip to the right of the text column. */
+        private final float searchJumpPadLocalX;
         private GuiMessage.@Nullable Line pickedLine;
+        /** Set with {@link #pickedLine}; horizontal offset into {@link GuiMessage.Line#content()}. */
+        private int pickedRelX = -1;
 
         PickerState(Minecraft mc, ChatComponent chat, int mouseX, int mouseY, int guiHeight) {
             double scale = chat.getScale();
@@ -147,6 +264,15 @@ public final class VanillaChatLinePicker {
             this.chatBottom = Mth.floor((guiHeight - 40) / sf);
             this.entryHeight = Math.max(1, chat.getLineHeight());
             this.rowInnerWidth = Mth.ceil(chat.getWidth() / sf);
+            float pad = 0f;
+            if (ChatUtilitiesClientOptions.isChatSearchBarEnabled() && mc.screen instanceof ChatScreen) {
+                if (ChatSearchState.isFiltering()) {
+                    int wScr =
+                            mc.font.width(Component.translatable("chat-utilities.chat_search.jump")) + 24;
+                    pad = wScr / sf;
+                }
+            }
+            this.searchJumpPadLocalX = pad;
         }
 
         void onLine(GuiMessage.Line line, int lineIndex, float opacity) {
@@ -157,16 +283,17 @@ public final class VanillaChatLinePicker {
             if (seq == null || FormattedCharSequence.EMPTY.equals(seq)) {
                 return;
             }
-            int slide = ChatSmoothAppearance.fadeSlideOffsetYPixels(line.addedTime());
+            int slide = vanillaLineSlideY(line);
             int rowBottom = this.chatBottom - lineIndex * this.entryHeight + slide;
             int rowTop = rowBottom - this.entryHeight;
-            if (localMouseX < -4 || localMouseX >= rowInnerWidth + 8) {
+            if (localMouseX < -4 || localMouseX >= rowInnerWidth + 8 + searchJumpPadLocalX) {
                 return;
             }
             if (localMouseY < rowTop || localMouseY >= rowBottom) {
                 return;
             }
             pickedLine = line;
+            pickedRelX = Mth.clamp(Mth.floor(localMouseX + 4f), 0, 16384);
         }
     }
 
@@ -228,6 +355,159 @@ public final class VanillaChatLinePicker {
         return mc.getWindow().getGuiScaledHeight();
     }
 
+    /**
+     * Screen-space Y (gui px) of the bottom edge of the lowest visible expanded-chat row (same pose as vanilla
+     * {@link ChatComponent} rendering). Used to lay out UI (e.g. search bar) in the gutter above the chat input.
+     */
+    public static int expandedChatLowestLineBottomScreenY(Minecraft mc) {
+        ChatComponent chat = mc.gui.getChat();
+        double scale = chat.getScale();
+        float sf = (float) scale;
+        int gh = guiScaledHeight(mc);
+        int chatBottomLocal = Mth.floor((gh - 40) / sf);
+        int rowBottomLocal = chatBottomLocal;
+        List<GuiMessage.Line> vis = collectVisibleGuiLines(chat);
+        if (!vis.isEmpty()) {
+            int slide = vanillaLineSlideY(vis.get(0));
+            rowBottomLocal = chatBottomLocal + slide;
+        }
+        var pose = new Matrix3x2f();
+        pose.scale(sf, sf);
+        pose.translate(4.0f, 0.0f);
+        Vector2f sp = pose.transformPosition(0f, (float) rowBottomLocal, new Vector2f());
+        return Mth.ceil(sp.y);
+    }
+
+    /**
+     * Screen-space Y (gui px) of the top edge of the expanded chat column as if the viewport were full (same pose as
+     * vanilla {@link ChatComponent} rendering), not tied to the current scroll position. Used to place UI above the
+     * whole chat column.
+     */
+    public static int expandedChatHighestLineTopScreenY(Minecraft mc) {
+        ChatComponent chat = mc.gui.getChat();
+        double scale = chat.getScale();
+        float sf = (float) scale;
+        int gh = guiScaledHeight(mc);
+        int chatBottomLocal = Mth.floor((gh - 40) / sf);
+        int entryHeight = Math.max(1, chat.getLineHeight());
+        int rowsFitting = Math.max(1, chatBottomLocal / entryHeight);
+        int rowTopLocal = chatBottomLocal - rowsFitting * entryHeight;
+        var pose = new Matrix3x2f();
+        pose.scale(sf, sf);
+        pose.translate(4.0f, 0.0f);
+        Vector2f sp = pose.transformPosition(0f, (float) rowTopLocal, new Vector2f());
+        return Mth.floor(sp.y);
+    }
+
+    /**
+     * Screen-space Y (gui px) of the top edge of the topmost <em>visible</em> expanded-chat row (same pose as vanilla
+     * {@link ChatComponent} rendering). Used to place UI immediately above the on-screen chat stack.
+     */
+    public static int expandedChatTopVisibleLineTopScreenY(Minecraft mc) {
+        ChatComponent chat = mc.gui.getChat();
+        if (chat.isChatHidden()) {
+            return expandedChatHighestLineTopScreenY(mc);
+        }
+        List<GuiMessage.Line> vis = collectVisibleGuiLines(chat);
+        if (vis.isEmpty()) {
+            return expandedChatHighestLineTopScreenY(mc);
+        }
+        GuiMessage.Line topLine = vis.get(vis.size() - 1);
+        int idx = vis.size() - 1;
+        double scale = chat.getScale();
+        float sf = (float) scale;
+        int gh = guiScaledHeight(mc);
+        int chatBottom = Mth.floor((gh - 40) / sf);
+        int entryHeight = Math.max(1, chat.getLineHeight());
+        int slide = vanillaLineSlideY(topLine);
+        int rowBottom = chatBottom - idx * entryHeight + slide;
+        int rowTop = rowBottom - entryHeight;
+        var pose = new Matrix3x2f();
+        pose.scale(sf, sf);
+        pose.translate(4.0f, 0.0f);
+        Vector2f sp = pose.transformPosition(0f, (float) rowTop, new Vector2f());
+        return Mth.floor(sp.y);
+    }
+
+    /**
+     * Screen-space Y (gui px) at the vertical center of the row for {@code line}, using the same layout as chat
+     * rendering after search filtering (only matching rows are laid out contiguously).
+     */
+    public static Optional<Float> guiScreenCenterYForGuiLine(Minecraft mc, GuiMessage.Line line) {
+        ChatComponent chat = mc.gui.getChat();
+        if (chat.isChatHidden()) {
+            return Optional.empty();
+        }
+        List<GuiMessage.Line> vis = collectVisibleGuiLines(chat);
+        int idx = vis.indexOf(line);
+        if (idx < 0) {
+            return Optional.empty();
+        }
+        double scale = chat.getScale();
+        float sf = (float) scale;
+        int gh = guiScaledHeight(mc);
+        int chatBottom = Mth.floor((gh - 40) / sf);
+        int entryHeight = Math.max(1, chat.getLineHeight());
+        int slide = vanillaLineSlideY(line);
+        int rowBottom = chatBottom - idx * entryHeight + slide;
+        int rowTop = rowBottom - entryHeight;
+        float midLocalY = (rowTop + rowBottom) * 0.5f;
+        var pose = new Matrix3x2f();
+        pose.scale(sf, sf);
+        pose.translate(4.0f, 0.0f);
+        Vector2f sp = pose.transformPosition(0f, midLocalY, new Vector2f());
+        return Optional.of(sp.y);
+    }
+
+    /**
+     * Screen-space Y range {@code [min, max)} for the chat row containing {@code line} (same layout as
+     * {@link #guiScreenCenterYForGuiLine}). Used to keep Jump UI active while the cursor moves from the text to the
+     * button within the same row.
+     */
+    public static Optional<int[]> guiScreenRowScreenYBoundsForGuiLine(Minecraft mc, GuiMessage.Line line) {
+        ChatComponent chat = mc.gui.getChat();
+        if (chat.isChatHidden()) {
+            return Optional.empty();
+        }
+        List<GuiMessage.Line> vis = collectVisibleGuiLines(chat);
+        int idx = vis.indexOf(line);
+        if (idx < 0) {
+            return Optional.empty();
+        }
+        double scale = chat.getScale();
+        float sf = (float) scale;
+        int gh = guiScaledHeight(mc);
+        int chatBottom = Mth.floor((gh - 40) / sf);
+        int entryHeight = Math.max(1, chat.getLineHeight());
+        int slide = vanillaLineSlideY(line);
+        int rowBottom = chatBottom - idx * entryHeight + slide;
+        int rowTop = rowBottom - entryHeight;
+        var pose = new Matrix3x2f();
+        pose.scale(sf, sf);
+        pose.translate(4.0f, 0.0f);
+        Vector2f tTop = pose.transformPosition(0f, (float) rowTop, new Vector2f());
+        Vector2f tBot = pose.transformPosition(0f, (float) rowBottom, new Vector2f());
+        int yMin = Mth.floor(Math.min(tTop.y, tBot.y));
+        int yMax = Mth.ceil(Math.max(tTop.y, tBot.y));
+        int yPad = 4;
+        return Optional.of(new int[] {yMin - yPad, yMax + yPad});
+    }
+
+    /** True if {@code (mouseX, mouseY)} lies in the full-width horizontal strip for that chat row. */
+    public static boolean guiScreenMouseInVerticalBandForGuiLine(
+            Minecraft mc, GuiMessage.Line line, int mouseX, int mouseY, int screenW, int screenH) {
+        Optional<int[]> span = guiScreenRowScreenYBoundsForGuiLine(mc, line);
+        if (span.isEmpty()) {
+            return false;
+        }
+        int yMin = span.get()[0];
+        int yMax = span.get()[1];
+        if (mouseY < yMin || mouseY >= yMax) {
+            return false;
+        }
+        return mouseX >= 0 && mouseX < screenW && mouseY >= 0 && mouseY < screenH;
+    }
+
     private static Component formattedSequenceToComponent(FormattedCharSequence seq) {
         MutableComponent out = Component.empty();
         seq.accept(
@@ -240,4 +520,10 @@ public final class VanillaChatLinePicker {
         return out;
     }
 
+    private static int vanillaLineSlideY(GuiMessage.Line line) {
+        if (ChatUtilitiesManager.get().shouldSuppressVanillaSmoothForLine(line)) {
+            return 0;
+        }
+        return ChatSmoothAppearance.fadeSlideOffsetYPixels(line.addedTime());
+    }
 }

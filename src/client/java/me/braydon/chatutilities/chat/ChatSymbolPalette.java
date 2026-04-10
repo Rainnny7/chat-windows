@@ -10,9 +10,16 @@ import net.minecraft.client.gui.GuiGraphics;
 import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.resources.language.I18n;
 import net.minecraft.client.resources.sounds.SimpleSoundInstance;
+import net.minecraft.network.chat.Component;
 import net.minecraft.sounds.SoundEvents;
 import net.minecraft.util.Mth;
 import org.jspecify.annotations.Nullable;
+import org.lwjgl.glfw.GLFW;
+
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
 
 /**
  * LabyMod-style palette: legacy codes in a left strip and a scrollable Unicode grid in a panel anchored
@@ -28,6 +35,8 @@ public final class ChatSymbolPalette {
     public static final int PALETTE_SYMBOL_WELL = 0x28080810;
     public static final int PALETTE_HOVER_CELL = 0x304878C8;
     public static final int PALETTE_HOVER_FORMAT = 0x40FFFFFF;
+    /** Slightly lighter than panel bg so §0 (black) remains visible in the format strip. */
+    public static final int PALETTE_FORMAT_CELL_BG = 0xF01A1A22;
 
     /** Chat bar chip — same family as root GUI list rows. */
     public static final int HUD_CHIP_FILL = 0xE510121A;
@@ -40,30 +49,42 @@ public final class ChatSymbolPalette {
     private static final String FORMAT_HEX = "abcdef";
     private static final String FORMAT_DIGITS = "0123456789";
 
-    /**
-     * Unicode shortcuts (from LabyMod {@code GuiChatSymbols#createSymbols}); BMP characters only in the
-     * literal string.
-     */
-    private static final String SYMBOL_SOURCE =
+    /** Legacy “hand-picked” symbols (BMP only), plus extra ranges added in {@link #buildSymbols()}. */
+    private static final String SYMBOL_SEED =
             "\u2764\u2765\u2714\u2716\u2717\u2718\u2742\u22c6\u2722\u2723\u2724\u2725\u2726\u2729\u272a\u272b\u272c\u272d\u272e\u272f\u2730\u2605\u2731\u2732\u2733\u2734\u2735\u2736\u2737\u2738\u2739\u273a\u273b\u273c\u2744\u2745\u2746\u2747\u2748\u2749\u274a\u274b\u2606\u2721\u273d\u273e\u273f\u2740\u2741\u2743\u270c\u267c\u267d\u2702\u2704\u2708\u27a1\u2b05\u2b06\u2b07\u279f\u27a2\u27a3\u27a4\u27a5\u27a6\u27a7\u27a8\u279a\u2798\u2799\u279b\u279c\u279d\u279e\u27b8\u27b2\u27b3\u27b4\u27b5\u27b6\u27b7\u27b9\u27ba\u27bb\u27bc\u27bd\u24c2\u2b1b\u2b1c\u2588\u259b\u2580\u259c\u2586\u2584\u258c\u2615\u2139\u2122\u2691\u2690\u2603\u26a0\u2694\u2696\u2692\u2699\u269c\u2680\u2681\u2682\u2683\u2684\u2685\u268a\u268b\u268c\u268d\u268e\u268f\u2630\u2631\u2632\u2633\u2634\u2635\u2636\u2637\u2686\u2687\u2688\u2689\u267f\u2669\u266a\u266b\u266c\u266d\u266e\u266f\u2660\u2661\u2662\u2663\u2664\u2665\u2666\u2667\u2654\u2655\u2656\u2657\u2658\u2659\u265a\u265b\u265c\u265d\u265e\u265f\u26aa\u26ab\u262f\u262e\u2623\u260f\u2780\u2781\u2782\u2783\u2784\u2785\u2786\u2787\u2788\u2789\u278a\u278b\u278c\u278d\u278e\u278f\u2790\u2791\u2792\u2793\u24d0\u24d1\u24d2\u24d3\u24d4\u24d5\u24d6\u24d7\u24d8\u24d9\u24da\u24db\u24dc\u24dd\u24de\u24df\u24e0\u24e1\u24e2\u24e3\u24e4\u24e5\u24e6\u24e7\u24e8\u24e9\uc6c3\uc720\u264b\u2622\u2620\u2611\u25b2\u231a\u00bf\u2763\u2642\u2640\u263f\u24b6\u270d\u2709\u2624\u2612\u25bc\u2318\u231b\u00a1\u10e6\u30c4\u263c\u2601\u2652\u270e\u00a9\u00ae\u03a3\u262d\u271e\u2103\u2109\u03df\u2602\u00a2\u00a3\u221e\u00bd\u262a\u263a\u263b\u2639\u2307\u269b\u2328\u2706\u260e\u2325\u21e7\u21a9\u2190\u2192\u2191\u2193\u27ab\u261c\u261e\u261d\u261f\u267a\u2332\u26a2\u26a3\u2751\u2752\u25c8\u25d0\u25d1\u00ab\u00bb\u2039\u203a\u2013\u2014\u2044\u00b6\u203d\u2042\u203b\u00b1\u00d7\u2248\u00f7\u2260\u03c0\u2020\u2021\u00a5\u20ac\u2030\u2026\u00b7\u2022\u25cf";
 
     private static final String[] SYMBOLS = buildSymbols();
+    private static final @Nullable String[] SYMBOL_UNICODE_NAMES = buildUnicodeNames();
 
-    private static final int CELL = 11;
-    private static final int SYMBOL_CELL = 10;
+    private static final int CELL = 14;
+    private static final int SYMBOL_CELL = 14;
     private static final int PANEL_PAD = 4;
     private static final int EDGE_MARGIN = 4;
     /** Total width of the symbols panel (right block), matching the previous single-panel body width. */
-    private static final int MAIN_PANEL_WIDTH = 148;
+    private static final int MAIN_PANEL_WIDTH = 220;
     /** Space between the legacy-code strip and the symbols panel (kept small so the two read as one block). */
     private static final int STRIP_GAP = 1;
     /** Left inset of the symbol grid inside the main panel (title/divider keep {@link #PANEL_PAD}). */
     private static final int SYMBOL_WELL_PAD_LEFT = 2;
-    private static final int STACK_HEIGHT = 136;
+    private static final int STACK_HEIGHT = 200;
     private static final int CLOSE_SIZE = 10;
+    private static final int SEARCH_H = 16;
+    private static final int SEARCH_GAP = 4;
+    private static final int SEARCH_PAD_X = 6;
 
     private boolean open;
     private double scrollPixels;
+    private boolean searchFocused;
+    private String searchQuery = "";
+    private int searchCursor;
+    /** Selection range in {@link #searchQuery} (inclusive start, exclusive end). -1 means no selection. */
+    private int searchSelStart = -1;
+    private int searchSelEnd = -1;
+    private long searchBlinkLastMs;
+    private boolean searchBlinkOn = true;
+
+    private @Nullable List<Integer> cachedFilteredIndices;
+    private @Nullable String cachedFilteredQuery;
 
     public boolean isOpen() {
         return open;
@@ -73,6 +94,11 @@ public final class ChatSymbolPalette {
         this.open = open;
         if (!open) {
             scrollPixels = 0;
+            searchFocused = false;
+            searchSelStart = -1;
+            searchSelEnd = -1;
+            searchBlinkLastMs = 0L;
+            searchBlinkOn = true;
         }
     }
 
@@ -81,11 +107,69 @@ public final class ChatSymbolPalette {
     }
 
     private static String[] buildSymbols() {
-        String[] out = new String[SYMBOL_SOURCE.length()];
-        for (int i = 0; i < SYMBOL_SOURCE.length(); i++) {
-            out[i] = String.valueOf(SYMBOL_SOURCE.charAt(i));
+        LinkedHashSet<String> out = new LinkedHashSet<>();
+        for (int i = 0; i < SYMBOL_SEED.length(); i++) {
+            out.add(String.valueOf(SYMBOL_SEED.charAt(i)));
         }
-        return out;
+        // Extra “chat safe” ranges (BMP). Minecraft’s font won’t render everything, but this maximizes coverage.
+        addRange(out, 0x00A1, 0x00FF); // Latin-1 symbols
+        addRange(out, 0x0370, 0x03FF); // Greek
+        addRange(out, 0x2000, 0x206F); // General punctuation
+        addRange(out, 0x20A0, 0x20CF); // Currency
+        addRange(out, 0x2190, 0x21FF); // Arrows
+        addRange(out, 0x2200, 0x22FF); // Math operators
+        addRange(out, 0x2300, 0x23FF); // Misc technical
+        addRange(out, 0x2460, 0x24FF); // Enclosed alphanumerics
+        addRange(out, 0x2500, 0x257F); // Box drawing
+        addRange(out, 0x2580, 0x259F); // Block elements
+        addRange(out, 0x25A0, 0x25FF); // Geometric shapes
+        addRange(out, 0x2600, 0x26FF); // Misc symbols
+        addRange(out, 0x2700, 0x27BF); // Dingbats
+
+        List<String> list = new ArrayList<>(out);
+        list.sort(
+                (a, b) -> {
+                    int ca = a == null || a.isEmpty() ? -1 : a.charAt(0);
+                    int cb = b == null || b.isEmpty() ? -1 : b.charAt(0);
+                    String na = ca < 0 ? null : Character.getName(ca);
+                    String nb = cb < 0 ? null : Character.getName(cb);
+                    na = na == null ? null : na.toLowerCase(Locale.ROOT);
+                    nb = nb == null ? null : nb.toLowerCase(Locale.ROOT);
+                    if (na == null && nb == null) return Integer.compare(ca, cb);
+                    if (na == null) return 1;
+                    if (nb == null) return -1;
+                    int byName = na.compareTo(nb);
+                    return byName != 0 ? byName : Integer.compare(ca, cb);
+                });
+        return list.toArray(new String[0]);
+    }
+
+    private static void addRange(LinkedHashSet<String> out, int start, int endInclusive) {
+        for (int cp = start; cp <= endInclusive; cp++) {
+            if (Character.isSurrogate((char) cp)) {
+                continue;
+            }
+            if (Character.isISOControl(cp) || Character.isWhitespace(cp)) {
+                continue;
+            }
+            out.add(String.valueOf((char) cp));
+        }
+    }
+
+    private static @Nullable String[] buildUnicodeNames() {
+        String[] names = new String[SYMBOLS.length];
+        for (int i = 0; i < SYMBOLS.length; i++) {
+            String s = SYMBOLS[i];
+            if (s == null || s.isEmpty()) {
+                continue;
+            }
+            int cp = s.charAt(0);
+            String n = Character.getName(cp);
+            if (n != null && !n.isBlank()) {
+                names[i] = n.toLowerCase(Locale.ROOT);
+            }
+        }
+        return names;
     }
 
     private static int stripWidth() {
@@ -118,11 +202,28 @@ public final class ChatSymbolPalette {
 
     private static int symbolsTop(int screenHeight, Font font) {
         int st = stackTop(screenHeight);
-        return st + PANEL_PAD + font.lineHeight + 4;
+        return st + PANEL_PAD + font.lineHeight + 8 + SEARCH_H + SEARCH_GAP;
     }
 
     private static int symbolsAreaHeight(int screenHeight, Font font) {
         return stackBottom(screenHeight) - PANEL_PAD - symbolsTop(screenHeight, font);
+    }
+
+    private static int searchLeft(int screenWidth) {
+        return mainPanelLeft(screenWidth) + PANEL_PAD;
+    }
+
+    private static int searchRight(int screenWidth) {
+        return mainPanelRight(screenWidth) - PANEL_PAD;
+    }
+
+    private static int searchTop(int screenHeight, Font font) {
+        int st = stackTop(screenHeight);
+        return st + PANEL_PAD + font.lineHeight + 6;
+    }
+
+    private static int searchBottom(int screenHeight, Font font) {
+        return searchTop(screenHeight, font) + SEARCH_H;
     }
 
     private static int symbolsAreaLeft(int screenWidth) {
@@ -178,6 +279,9 @@ public final class ChatSymbolPalette {
             return true;
         }
         Font font = mc.font;
+        if (tryClickSearch(mx, my, screenWidth, screenHeight, font)) {
+            return true;
+        }
         int symTop = symbolsTop(screenHeight, font);
         int symH = symbolsAreaHeight(screenHeight, font);
         int symLeft = symbolsAreaLeft(screenWidth);
@@ -194,13 +298,251 @@ public final class ChatSymbolPalette {
                 return false;
             }
             int index = row * cols + col;
-            if (index < SYMBOLS.length) {
-                insertRaw(input, SYMBOLS[index]);
+            List<Integer> filtered = filteredIndices();
+            if (index >= 0 && index < filtered.size()) {
+                insertRaw(input, SYMBOLS[filtered.get(index)]);
                 playClick();
                 return true;
             }
         }
         return false;
+    }
+
+    private boolean tryClickSearch(double mx, double my, int screenWidth, int screenHeight, Font font) {
+        int l = searchLeft(screenWidth);
+        int r = searchRight(screenWidth);
+        int t = searchTop(screenHeight, font);
+        int b = searchBottom(screenHeight, font);
+        if (mx >= l && mx < r && my >= t && my < b) {
+            searchFocused = true;
+            searchBlinkLastMs = 0L;
+            searchBlinkOn = true;
+            searchCursor = searchQuery.length();
+            searchSelStart = -1;
+            searchSelEnd = -1;
+            return true;
+        }
+        // Clicking within the palette but outside the bar unfocuses it.
+        searchFocused = false;
+        searchSelStart = -1;
+        searchSelEnd = -1;
+        return false;
+    }
+
+    public boolean keyPressed(int keyCode, boolean shiftDown, boolean controlDown) {
+        if (!open || !searchFocused) {
+            return false;
+        }
+        // Ctrl+A: select all
+        if (controlDown && keyCode == GLFW.GLFW_KEY_A) {
+            if (searchQuery == null) {
+                searchQuery = "";
+            }
+            searchSelStart = 0;
+            searchSelEnd = searchQuery.length();
+            searchCursor = searchSelEnd;
+            return true;
+        }
+        // ESC
+        if (keyCode == 256) {
+            searchFocused = false;
+            searchSelStart = -1;
+            searchSelEnd = -1;
+            return true;
+        }
+        // BACKSPACE
+        if (keyCode == 259) {
+            if (hasSearchSelection()) {
+                deleteSearchSelection();
+                invalidateFilterCache();
+                return true;
+            }
+            if (searchCursor > 0 && !searchQuery.isEmpty()) {
+                int before = searchCursor - 1;
+                searchQuery = searchQuery.substring(0, before) + searchQuery.substring(searchCursor);
+                searchCursor = before;
+                invalidateFilterCache();
+            }
+            return true;
+        }
+        // DELETE
+        if (keyCode == 261) {
+            if (hasSearchSelection()) {
+                deleteSearchSelection();
+                invalidateFilterCache();
+                return true;
+            }
+            if (searchCursor < searchQuery.length()) {
+                searchQuery =
+                        searchQuery.substring(0, searchCursor) + searchQuery.substring(searchCursor + 1);
+                invalidateFilterCache();
+            }
+            return true;
+        }
+        // LEFT
+        if (keyCode == 263) {
+            int next = Math.max(0, searchCursor - 1);
+            moveSearchCursor(next, shiftDown);
+            return true;
+        }
+        // RIGHT
+        if (keyCode == 262) {
+            int next = Math.min(searchQuery.length(), searchCursor + 1);
+            moveSearchCursor(next, shiftDown);
+            return true;
+        }
+        // ENTER
+        if (keyCode == 257 || keyCode == 335) {
+            searchFocused = false;
+            searchSelStart = -1;
+            searchSelEnd = -1;
+            return true;
+        }
+        // Basic typing support via key codes (ChatScreen doesn't expose charTyped on this version).
+        char ch = keyToChar(keyCode, shiftDown);
+        if (ch != 0) {
+            if (searchQuery.length() < 64) {
+                if (hasSearchSelection()) {
+                    deleteSearchSelection();
+                }
+                searchCursor = Mth.clamp(searchCursor, 0, searchQuery.length());
+                String ins = String.valueOf(ch);
+                searchQuery =
+                        searchQuery.substring(0, searchCursor)
+                                + ins
+                                + searchQuery.substring(searchCursor);
+                searchCursor++;
+                invalidateFilterCache();
+            }
+            return true;
+        }
+        return false;
+    }
+
+    private boolean hasSearchSelection() {
+        return searchSelStart >= 0
+                && searchSelEnd >= 0
+                && searchQuery != null
+                && !searchQuery.isEmpty()
+                && searchSelStart != searchSelEnd;
+    }
+
+    private void deleteSearchSelection() {
+        if (!hasSearchSelection()) {
+            searchSelStart = -1;
+            searchSelEnd = -1;
+            return;
+        }
+        int a = Math.min(searchSelStart, searchSelEnd);
+        int b = Math.max(searchSelStart, searchSelEnd);
+        a = Mth.clamp(a, 0, searchQuery.length());
+        b = Mth.clamp(b, 0, searchQuery.length());
+        if (a >= b) {
+            searchSelStart = -1;
+            searchSelEnd = -1;
+            return;
+        }
+        searchQuery = searchQuery.substring(0, a) + searchQuery.substring(b);
+        searchCursor = a;
+        searchSelStart = -1;
+        searchSelEnd = -1;
+    }
+
+    private void moveSearchCursor(int nextCursor, boolean shiftDown) {
+        int cur = Mth.clamp(searchCursor, 0, searchQuery.length());
+        int next = Mth.clamp(nextCursor, 0, searchQuery.length());
+        if (shiftDown) {
+            if (searchSelStart < 0 || searchSelEnd < 0) {
+                searchSelStart = cur;
+                searchSelEnd = next;
+            } else {
+                searchSelEnd = next;
+            }
+        } else {
+            searchSelStart = -1;
+            searchSelEnd = -1;
+        }
+        searchCursor = next;
+    }
+
+    private static char keyToChar(int keyCode, boolean shift) {
+        // Digits
+        if (keyCode >= 48 && keyCode <= 57) {
+            return (char) keyCode;
+        }
+        // A-Z
+        if (keyCode >= 65 && keyCode <= 90) {
+            char base = (char) keyCode;
+            return shift ? base : (char) (base + 32);
+        }
+        // a-f convenience: allow direct hex typing via both cases (handled above).
+        // Dash/underscore
+        if (keyCode == 45 /* '-' */) {
+            return shift ? '_' : '-';
+        }
+        return 0;
+    }
+
+    private void invalidateFilterCache() {
+        cachedFilteredIndices = null;
+        cachedFilteredQuery = null;
+        scrollPixels = 0;
+    }
+
+    private List<Integer> filteredIndices() {
+        String q = searchQuery == null ? "" : searchQuery.strip();
+        if (cachedFilteredIndices != null && q.equals(cachedFilteredQuery)) {
+            return cachedFilteredIndices;
+        }
+        List<Integer> out = new ArrayList<>();
+        if (q.isEmpty()) {
+            for (int i = 0; i < SYMBOLS.length; i++) {
+                out.add(i);
+            }
+            cachedFilteredIndices = out;
+            cachedFilteredQuery = q;
+            return out;
+        }
+        String qLower = q.toLowerCase(Locale.ROOT);
+        String[] tokens = qLower.split("\\s+");
+        boolean hexLike = qLower.matches("[0-9a-f]+");
+        for (int i = 0; i < SYMBOLS.length; i++) {
+            String sym = SYMBOLS[i];
+            if (sym == null || sym.isEmpty()) {
+                continue;
+            }
+            if (q.length() == 1 && sym.equals(q)) {
+                out.add(i);
+                continue;
+            }
+            int cp = sym.charAt(0);
+            String hex = Integer.toHexString(cp);
+            if (hexLike && hex.contains(qLower)) {
+                out.add(i);
+                continue;
+            }
+            if (SYMBOL_UNICODE_NAMES != null) {
+                String n = SYMBOL_UNICODE_NAMES[i];
+                if (n != null) {
+                    boolean ok = true;
+                    for (String t : tokens) {
+                        if (t.isEmpty()) {
+                            continue;
+                        }
+                        if (!n.contains(t)) {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if (ok) {
+                        out.add(i);
+                    }
+                }
+            }
+        }
+        cachedFilteredIndices = out;
+        cachedFilteredQuery = q;
+        return out;
     }
 
     private boolean tryClickFormatStrip(
@@ -252,7 +594,7 @@ public final class ChatSymbolPalette {
     private void nudgeScroll(double delta, int screenWidth, int screenHeight, Font font) {
         int areaW = symbolsAreaRight(screenWidth) - symbolsAreaLeft(screenWidth);
         int cols = symbolColumnCount(areaW);
-        int rows = symbolRowCount(cols);
+        int rows = Math.max(1, (filteredIndices().size() + cols - 1) / cols);
         int symH = symbolsAreaHeight(screenHeight, font);
         int contentH = rows * SYMBOL_CELL;
         double maxScroll = Math.max(0, contentH - symH);
@@ -270,14 +612,16 @@ public final class ChatSymbolPalette {
         int st = stackTop(screenHeight);
         int sb = stackBottom(screenHeight);
 
-        graphics.fill(sl, st, sr, sb, PALETTE_SIDEBAR_BG);
+        // No single background behind the format strip; each cell paints its own background.
         graphics.fill(ml, st, mr, sb, PALETTE_PANEL_BG);
 
         graphics.fill(sr - 1, st, sr, sb, PALETTE_SIDEBAR_SEP);
 
-        graphics.renderOutline(sl, st, mr - sl, sb - st, PALETTE_PANEL_EDGE);
+        // Outline the main panel only (strip is cell-painted; the old shared background border is intentionally gone).
+        graphics.renderOutline(ml, st, mr - ml, sb - st, PALETTE_PANEL_EDGE);
 
         renderFormatStrip(graphics, font, mouseX, mouseY, screenWidth, screenHeight);
+        renderSearchBar(graphics, font, screenWidth, screenHeight, mouseX, mouseY);
 
         String title = I18n.get("chat-utilities.chat.symbol_palette.title");
         graphics.drawString(font, title, ml + PANEL_PAD, st + PANEL_PAD, ChatUtilitiesScreenLayout.TEXT_LABEL, false);
@@ -309,7 +653,8 @@ public final class ChatSymbolPalette {
         int symRight = symbolsAreaRight(screenWidth);
         int areaW = symRight - symLeft;
         int cols = symbolColumnCount(areaW);
-        int rowsTotal = symbolRowCount(cols);
+        List<Integer> filtered = filteredIndices();
+        int rowsTotal = Math.max(1, (filtered.size() + cols - 1) / cols);
         int contentHScroll = rowsTotal * SYMBOL_CELL;
         scrollPixels = Mth.clamp(scrollPixels, 0, Math.max(0, contentHScroll - symH));
 
@@ -323,7 +668,7 @@ public final class ChatSymbolPalette {
                 int r = firstRow + row;
                 for (int c = 0; c < cols; c++) {
                     int idx = r * cols + c;
-                    if (idx >= SYMBOLS.length) {
+                    if (idx >= filtered.size()) {
                         break;
                     }
                     int sx = symLeft + c * SYMBOL_CELL;
@@ -344,7 +689,7 @@ public final class ChatSymbolPalette {
                                 Math.min(symTop + symH, sy + SYMBOL_CELL),
                                 PALETTE_HOVER_CELL);
                     }
-                    String sym = SYMBOLS[idx];
+                    String sym = SYMBOLS[filtered.get(idx)];
                     int sw = font.width(sym);
                     int sh = font.lineHeight;
                     int drawY = sy + (SYMBOL_CELL - sh) / 2;
@@ -357,9 +702,73 @@ public final class ChatSymbolPalette {
             graphics.disableScissor();
         }
 
-        int rows = symbolRowCount(cols);
-        int contentH = rows * SYMBOL_CELL;
+        int contentH = rowsTotal * SYMBOL_CELL;
         ThinScrollbar.render(graphics, symRight, symTop, symH, contentH, scrollPixels, 1f);
+    }
+
+    private void renderSearchBar(
+            GuiGraphics g, Font font, int screenWidth, int screenHeight, int mouseX, int mouseY) {
+        int l = searchLeft(screenWidth);
+        int r = searchRight(screenWidth);
+        int t = searchTop(screenHeight, font);
+        int b = searchBottom(screenHeight, font);
+        boolean hov = mouseX >= l && mouseX < r && mouseY >= t && mouseY < b;
+        int bg = searchFocused ? 0x50203040 : hov ? 0x40202028 : 0x30202028;
+        int edge = searchFocused ? 0xFF6A88D0 : 0xFF2C2C3A;
+        g.fill(l, t, r, b, bg);
+        g.renderOutline(l, t, r - l, b - t, edge);
+
+        String q = searchQuery == null ? "" : searchQuery;
+        boolean empty = q.isEmpty();
+        String draw = empty ? "Search (hex too)..." : q;
+        int color = empty ? 0xFF8A8A98 : 0xFFE8EEF8;
+        int maxW = (r - l) - SEARCH_PAD_X * 2;
+        String clipped = draw;
+        while (!clipped.isEmpty() && font.width(clipped) > maxW) {
+            clipped = clipped.substring(1);
+        }
+        int clipStart = empty ? 0 : Math.max(0, q.length() - clipped.length());
+        int x = l + SEARCH_PAD_X;
+        int y = t + (SEARCH_H - 8) / 2;
+        if (!empty && hasSearchSelection()) {
+            int a = Math.min(searchSelStart, searchSelEnd);
+            int bb = Math.max(searchSelStart, searchSelEnd);
+            a = Mth.clamp(a, 0, q.length());
+            bb = Mth.clamp(bb, 0, q.length());
+            int va = Math.max(clipStart, a);
+            int vb = Math.max(clipStart, bb);
+            va = Math.min(va, q.length());
+            vb = Math.min(vb, q.length());
+            if (va < vb) {
+                String pre = q.substring(clipStart, va);
+                String sel = q.substring(va, vb);
+                int hlX0 = x + font.width(pre);
+                int hlX1 = hlX0 + font.width(sel);
+                g.fill(hlX0, t + 2, hlX1, b - 2, 0x804A6ED6);
+            }
+        }
+        g.drawString(font, clipped, x, y, color, false);
+
+        boolean showCursor = false;
+        if (searchFocused) {
+            long now = System.currentTimeMillis();
+            if (searchBlinkLastMs == 0L) {
+                searchBlinkLastMs = now;
+                searchBlinkOn = true;
+            } else if (now - searchBlinkLastMs >= 530L) {
+                searchBlinkLastMs = now;
+                searchBlinkOn = !searchBlinkOn;
+            }
+            showCursor = searchBlinkOn;
+        }
+        if (showCursor) {
+            int cur = Mth.clamp(searchCursor, 0, q.length());
+            int visCur = Math.max(clipStart, cur);
+            visCur = Mth.clamp(visCur, clipStart, q.length());
+            String before = q.substring(clipStart, visCur);
+            int cx = x + font.width(before);
+            g.fill(cx, y - 1, cx + 1, y + 9, 0xFFE8EEF8);
+        }
     }
 
     private void renderFormatStrip(
@@ -376,15 +785,27 @@ public final class ChatSymbolPalette {
                 int cy = innerTop + r * CELL;
                 boolean hovered =
                         mouseX >= cx && mouseX < cx + CELL && mouseY >= cy && mouseY < cy + CELL;
-                int bg = hovered ? PALETTE_HOVER_FORMAT : 0x20000000;
+                // No strip background: each cell gets its own background, matching the menu panel bg.
+                int bg = hovered ? PALETTE_HOVER_FORMAT : PALETTE_FORMAT_CELL_BG;
                 graphics.fill(cx, cy, cx + CELL, cy + CELL, bg);
                 char code = s.charAt(r);
-                String label = String.valueOf(code);
+                Component label = formatStripLabelComponent(code);
                 int tw = font.width(label);
                 int fg = labelColorForCode(code);
-                graphics.drawString(font, label, cx + (CELL - tw) / 2, cy + 2, fg, false);
+                graphics.drawString(font, label, cx + (CELL - tw) / 2, cy + 3, fg, false);
             }
         }
+    }
+
+    private static Component formatStripLabelComponent(char code) {
+        // Legacy style codes: k=obf, l=bold, m=strike, n=underline, o=italic, r=reset.
+        if (code == 'k') return Component.literal("K").withStyle(ChatFormatting.OBFUSCATED);
+        if (code == 'l') return Component.literal("B").withStyle(ChatFormatting.BOLD);
+        if (code == 'm') return Component.literal("S").withStyle(ChatFormatting.STRIKETHROUGH);
+        if (code == 'n') return Component.literal("U").withStyle(ChatFormatting.UNDERLINE);
+        if (code == 'o') return Component.literal("I").withStyle(ChatFormatting.ITALIC);
+        if (code == 'r') return Component.literal("R").withStyle(ChatFormatting.RESET);
+        return Component.literal(String.valueOf(code));
     }
 
     private static int labelColorForCode(char code) {

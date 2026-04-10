@@ -1,5 +1,6 @@
 package me.braydon.chatutilities.chat;
 
+import me.braydon.chatutilities.client.ChatUtilitiesClientOptions;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Font;
 import net.minecraft.client.gui.screens.ChatScreen;
@@ -63,8 +64,11 @@ public final class ChatWindowClickHandler {
                 continue;
             }
             int tx = geo.x + ChatWindowGeometry.padding();
-            int ty = geo.y + ChatWindowGeometry.padding() + ChatWindowGeometry.CONTENT_TOP_INSET + geo.contentStartYOffset;
+            int ty = geo.y + geo.contentRowOffsetY;
             int textRight = geo.x + geo.boxW - ChatWindowGeometry.padding();
+            if (ChatUtilitiesClientOptions.isChatSearchBarEnabled() && ChatSearchState.isFiltering()) {
+                textRight += 56;
+            }
             int textBottom = geo.y + geo.boxH - ChatWindowGeometry.padding();
             if (mx < tx || mx >= textRight || my < ty || my >= textBottom) {
                 continue;

@@ -1,9 +1,15 @@
 package me.braydon.chatutilities.chat;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Deque;
+import java.util.List;
+import java.util.Objects;
+import java.util.UUID;
 import java.util.regex.Pattern;
 
 import me.braydon.chatutilities.client.ChatUtilitiesClientOptions;
+import net.minecraft.util.Mth;
 
 public final class ChatWindow {
     public static final float DEFAULT_WIDTH_FRAC = 0.32f;
@@ -13,11 +19,12 @@ public final class ChatWindow {
     public static final int MIN_VISIBLE_LINES = 2;
     public static final int MAX_VISIBLE_LINES_CAP = 512;
 
+    public static final String DEFAULT_TAB_NAME = "Default";
+
     private final String id;
-    private final List<Pattern> patterns = new ArrayList<>();
-    private final List<String> patternSources = new ArrayList<>();
-    private final Deque<ChatWindowLine> lines = new ArrayDeque<>();
-    private int historyScrollRows;
+    private final List<ChatWindowTab> tabs = new ArrayList<>();
+    private int selectedTabIndex;
+
     private float anchorX = 0.02f;
     private float anchorY = 0.85f;
     private float widthFrac = DEFAULT_WIDTH_FRAC;
@@ -27,30 +34,77 @@ public final class ChatWindow {
 
     public ChatWindow(String id, Pattern firstPattern, String firstSource) {
         this.id = id;
-        this.patterns.add(firstPattern);
-        this.patternSources.add(firstSource);
+        ChatWindowTab t = new ChatWindowTab(UUID.randomUUID().toString(), DEFAULT_TAB_NAME);
+        t.addPattern(firstPattern, firstSource);
+        tabs.add(t);
     }
 
     public ChatWindow(String id, List<Pattern> compiled, List<String> sources) {
         this.id = id;
-        this.patterns.addAll(compiled);
-        this.patternSources.addAll(sources);
+        ChatWindowTab t = new ChatWindowTab(UUID.randomUUID().toString(), DEFAULT_TAB_NAME, compiled, sources);
+        tabs.add(t);
+    }
+
+    /** Restore from persistence with explicit tab list (at least one tab). */
+    public ChatWindow(String id, List<ChatWindowTab> restoredTabs) {
+        this.id = id;
+        if (restoredTabs == null || restoredTabs.isEmpty()) {
+            throw new IllegalArgumentException("ChatWindow requires at least one tab");
+        }
+        tabs.addAll(restoredTabs);
     }
 
     public String getId() {
         return id;
     }
 
+    public List<ChatWindowTab> getTabs() {
+        return Collections.unmodifiableList(tabs);
+    }
+
+    public int getTabCount() {
+        return tabs.size();
+    }
+
+    public int getSelectedTabIndex() {
+        return tabs.isEmpty() ? 0 : Mth.clamp(selectedTabIndex, 0, tabs.size() - 1);
+    }
+
+    public void setSelectedTabIndex(int index) {
+        if (tabs.isEmpty()) {
+            return;
+        }
+        selectedTabIndex = Mth.clamp(index, 0, tabs.size() - 1);
+        tabs.get(selectedTabIndex).clearUnreadCount();
+    }
+
+    public ChatWindowTab getSelectedTab() {
+        int i = getSelectedTabIndex();
+        return tabs.get(i);
+    }
+
+    public @org.jspecify.annotations.Nullable ChatWindowTab getTabById(String tabId) {
+        if (tabId == null) {
+            return null;
+        }
+        for (ChatWindowTab t : tabs) {
+            if (t.getId().equals(tabId)) {
+                return t;
+            }
+        }
+        return null;
+    }
+
     /**
-     * Same window state under a new id (for rename). Preserves patterns, HUD history, layout, and
-     * positioning flags.
+     * Same window state under a new id (for rename). Preserves tabs, HUD history, layout, and positioning flags.
      */
     public ChatWindow withId(String newId) {
-        ChatWindow nw = new ChatWindow(newId, new ArrayList<>(patterns), new ArrayList<>(patternSources));
-        nw.historyScrollRows = this.historyScrollRows;
-        for (ChatWindowLine line : this.lines) {
-            nw.lines.addLast(line);
+        List<ChatWindowTab> copied = new ArrayList<>();
+        for (ChatWindowTab t : tabs) {
+            copied.add(t.copyForNewWindowId(UUID.randomUUID().toString(), t.getDisplayName()));
         }
+        ChatWindow nw = new ChatWindow(newId, copied);
+        nw.selectedTabIndex = this.selectedTabIndex;
         nw.anchorX = this.anchorX;
         nw.anchorY = this.anchorY;
         nw.widthFrac = this.widthFrac;
@@ -60,100 +114,130 @@ public final class ChatWindow {
         return nw;
     }
 
+    /** First tab id (for APIs that omit tab). */
+    public String getDefaultTabId() {
+        return tabs.getFirst().getId();
+    }
+
     public List<String> getPatternSources() {
-        return Collections.unmodifiableList(patternSources);
-    }
-
-    public int getPatternCount() {
-        return patternSources.size();
-    }
-
-    public String getPrimaryRegexSource() {
-        return patternSources.isEmpty() ? "" : patternSources.getFirst();
+        return getSelectedTab().getPatternSources();
     }
 
     public void addPattern(Pattern pattern, String source) {
-        patterns.add(pattern);
-        patternSources.add(source);
+        getSelectedTab().addPattern(pattern, source);
     }
 
     public boolean removePatternAtUserIndex(int userPosition) {
-        int i = userPosition - 1;
-        if (i < 0 || i >= patterns.size()) {
-            return false;
-        }
-        patterns.remove(i);
-        patternSources.remove(i);
-        return true;
+        return getSelectedTab().removePatternAtUserIndex(userPosition);
     }
 
     public boolean setPatternAtUserIndex(int userPosition, Pattern pattern, String source) {
-        int i = userPosition - 1;
-        if (i < 0 || i >= patterns.size()) {
-            return false;
-        }
-        patterns.set(i, pattern);
-        patternSources.set(i, source);
-        return true;
+        return getSelectedTab().setPatternAtUserIndex(userPosition, pattern, source);
     }
 
     public boolean matches(String text) {
-        if (patterns.isEmpty()) {
-            return false;
-        }
-        for (Pattern p : patterns) {
-            if (p.matcher(text).find()) {
+        for (ChatWindowTab t : tabs) {
+            if (t.matches(text)) {
                 return true;
             }
         }
         return false;
     }
 
+    /** Append the same line instance to every tab whose patterns match {@code text}. */
+    public void addLineToMatchingTabs(ChatWindowLine line, String text) {
+        int sel = getSelectedTabIndex();
+        for (int i = 0; i < tabs.size(); i++) {
+            ChatWindowTab t = tabs.get(i);
+            if (t.matches(text)) {
+                t.addLine(line);
+                if (i != sel && ChatUtilitiesClientOptions.isChatWindowTabUnreadBadgesEnabled()) {
+                    t.incrementUnreadCount();
+                }
+            }
+        }
+    }
+
     public Deque<ChatWindowLine> getLines() {
-        return lines;
+        return getSelectedTab().getLines();
     }
 
     public int getHistoryScrollRows() {
-        return historyScrollRows;
+        return getSelectedTab().getHistoryScrollRows();
     }
 
     public void setHistoryScrollRows(int historyScrollRows) {
-        this.historyScrollRows = Math.max(0, historyScrollRows);
+        getSelectedTab().setHistoryScrollRows(historyScrollRows);
     }
 
     public void clampHistoryScroll(int maxScroll) {
-        historyScrollRows = Math.min(historyScrollRows, Math.max(0, maxScroll));
+        getSelectedTab().clampHistoryScroll(maxScroll);
     }
 
     public void addHistoryScrollRows(int delta, int totalWrappedRows, int viewportRows) {
-        int maxScroll = Math.max(0, totalWrappedRows - viewportRows);
-        historyScrollRows = Math.max(0, Math.min(historyScrollRows + delta, maxScroll));
+        getSelectedTab().addHistoryScrollRows(delta, totalWrappedRows, viewportRows);
     }
 
     public void resetHistoryScroll() {
-        historyScrollRows = 0;
+        for (ChatWindowTab t : tabs) {
+            t.resetHistoryScroll();
+        }
     }
 
-    public void addLine(ChatWindowLine line) {
-        ChatWindowLine toAdd = line;
-        if (ChatUtilitiesClientOptions.isStackRepeatedMessages()) {
-            ChatWindowLine last = lines.peekLast();
-            if (last != null && last.sameStackAs(line)) {
-                lines.removeLast();
-                toAdd = last.mergedWithRepeat();
+    public void clearStoredChat() {
+        for (ChatWindowTab t : tabs) {
+            t.clearStoredChat();
+        }
+    }
+
+    void addTab(ChatWindowTab tab) {
+        tabs.add(Objects.requireNonNull(tab));
+    }
+
+    boolean removeTabById(String tabId) {
+        if (tabs.size() <= 1 || tabId == null) {
+            return false;
+        }
+        int idx = -1;
+        for (int i = 0; i < tabs.size(); i++) {
+            if (tabs.get(i).getId().equals(tabId)) {
+                idx = i;
+                break;
             }
         }
-        int cap = ChatUtilitiesClientOptions.getEffectiveChatHistoryLimit();
-        while (lines.size() >= cap) {
-            lines.removeFirst();
+        if (idx < 0) {
+            return false;
         }
-        lines.addLast(toAdd);
+        tabs.remove(idx);
+        selectedTabIndex = Mth.clamp(selectedTabIndex, 0, tabs.size() - 1);
+        return true;
     }
 
-    /** Clears HUD history for this window (e.g. when vanilla chat is cleared with F3+D). */
-    public void clearStoredChat() {
-        lines.clear();
-        resetHistoryScroll();
+    /**
+     * Move a tab within this window (for drag-to-reorder).
+     *
+     * @return true if the order changed
+     */
+    public boolean moveTab(int fromIndex, int toIndex) {
+        if (tabs.size() <= 1) {
+            return false;
+        }
+        int n = tabs.size();
+        int from = Mth.clamp(fromIndex, 0, n - 1);
+        int to = Mth.clamp(toIndex, 0, n - 1);
+        if (from == to) {
+            return false;
+        }
+        ChatWindowTab selected = tabs.get(getSelectedTabIndex());
+        ChatWindowTab moved = tabs.remove(from);
+        int insertAt = to;
+        if (from < to) {
+            insertAt = Math.max(0, to - 1);
+        }
+        tabs.add(insertAt, moved);
+        int selNow = tabs.indexOf(selected);
+        selectedTabIndex = selNow >= 0 ? selNow : Mth.clamp(selectedTabIndex, 0, tabs.size() - 1);
+        return true;
     }
 
     public float getAnchorX() {

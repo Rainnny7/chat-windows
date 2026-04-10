@@ -1,6 +1,7 @@
 package me.braydon.chatutilities.chat;
 
 import com.mojang.blaze3d.platform.Window;
+import me.braydon.chatutilities.ChatUtilitiesModClient;
 import me.braydon.chatutilities.client.ChatUtilitiesClientOptions;
 import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
 import net.minecraft.ChatFormatting;
@@ -11,11 +12,14 @@ import net.minecraft.client.gui.components.Tooltip;
 import net.minecraft.client.gui.screens.ChatScreen;
 import net.minecraft.client.gui.screens.inventory.tooltip.ClientTooltipComponent;
 import net.minecraft.client.gui.screens.inventory.tooltip.DefaultTooltipPositioner;
+import net.minecraft.client.resources.language.I18n;
 import net.minecraft.network.chat.Component;
 import net.minecraft.util.ARGB;
 import net.minecraft.util.FormattedCharSequence;
 import net.minecraft.util.Mth;
+import org.lwjgl.glfw.GLFW;
 
+import java.util.ArrayList;
 import java.util.List;
 
 public final class ChatUtilitiesHud {
@@ -31,6 +35,13 @@ public final class ChatUtilitiesHud {
         // Only suppress when the full F3 overlay is open — not for lines/charts set to "always" in debug settings.
         if (mc.options.hideGui || mc.debugEntries.isOverlayVisible()) {
             return;
+        }
+        // Vanilla player list overlay (Tab) should render above our HUD windows.
+        if (mc.screen == null) {
+            long wh = mc.getWindow().handle();
+            if (GLFW.glfwGetKey(wh, GLFW.GLFW_KEY_TAB) == GLFW.GLFW_PRESS) {
+                return;
+            }
         }
         // ChatScreen draws after the HUD pass; layout windows sit near the chat area and would be fully covered.
         // {@link me.braydon.chatutilities.mixin.client.ChatScreenMixin} paints them at render TAIL instead.
@@ -67,18 +78,29 @@ public final class ChatUtilitiesHud {
         int mx = (int) mc.mouseHandler.getScaledXPos(win);
         int my = (int) mc.mouseHandler.getScaledYPos(win);
         boolean chatOpen = mc.screen instanceof ChatScreen;
+        boolean chatPeek =
+                ChatUtilitiesModClient.CHAT_PEEK_KEY != null && ChatUtilitiesModClient.CHAT_PEEK_KEY.isDown();
+        boolean chatExpandedForWindows = chatOpen || chatPeek;
         int guiTick = mc.gui.getGuiTicks();
         float chatOpacity = mc.options.chatOpacity().get().floatValue();
 
         ChatUtilitiesManager mgr = ChatUtilitiesManager.get();
         for (ChatWindow window : mgr.getHudChatWindows()) {
             boolean layoutChrome = mgr.showsLayoutChrome(window);
-            if (!window.isVisible() && !(mgr.isPositioning() && layoutChrome)) {
+            boolean showUnreadOnly =
+                    window.isVisible()
+                            && !chatExpandedForWindows
+                            && ChatUtilitiesClientOptions.isAlwaysShowUnreadTabs()
+                            && !mgr.isPositioning()
+                            && !layoutChrome
+                            && window.getTabCount() > 1
+                            && window.getTabs().stream().anyMatch(t -> t != null && t.getUnreadCount() > 0);
+            if (!window.isVisible() && !showUnreadOnly && !(mgr.isPositioning() && layoutChrome)) {
                 continue;
             }
 
             boolean hasStored = !window.getLines().isEmpty();
-            if (!hasStored && !layoutChrome && !chatOpen) {
+            if (!hasStored && !layoutChrome && !chatExpandedForWindows && !showUnreadOnly) {
                 continue;
             }
 
@@ -101,7 +123,7 @@ public final class ChatUtilitiesHud {
                             placeholder,
                             guiTick,
                             layoutChrome,
-                            chatOpen,
+                            chatExpandedForWindows,
                             mx,
                             my,
                             false,
@@ -111,7 +133,7 @@ public final class ChatUtilitiesHud {
                 continue;
             }
 
-            if (hasStored && geo.rows.isEmpty() && !chatOpen && !layoutChrome) {
+            if (hasStored && geo.rows.isEmpty() && !chatOpen && !layoutChrome && !showUnreadOnly) {
                 continue;
             }
 
@@ -120,8 +142,42 @@ public final class ChatUtilitiesHud {
             int boxW = geo.boxW;
             int boxH = geo.boxH;
 
+            if (showUnreadOnly) {
+                List<ChatWindowTab> unreadTabs = new ArrayList<>();
+                for (ChatWindowTab t : window.getTabs()) {
+                    if (t != null && t.getUnreadCount() > 0) {
+                        unreadTabs.add(t);
+                    }
+                }
+                if (!unreadTabs.isEmpty()) {
+                    // When the selected tab is empty, the normal geometry can become content-tight and jitter.
+                    // Use "chrome" geometry for stable placement of the unread-only strip.
+                    ChatWindowGeometry geoUnread =
+                            ((!hasStored || geo.rows.isEmpty()) && !layoutChrome)
+                                    ? ChatWindowGeometry.compute(
+                                            window,
+                                            mc,
+                                            gw,
+                                            gh,
+                                            Component.literal("[empty]"),
+                                            guiTick,
+                                            true,
+                                            true,
+                                            mx,
+                                            my,
+                                            false,
+                                            false)
+                                    : geo;
+                    ChatWindowHudTabStrip.Placement pUnread =
+                            ChatWindowHudTabStrip.resolveUnreadOnly(geoUnread, gw, gh, mc, window, unreadTabs);
+                    float unreadOpacity = Mth.clamp(chatOpacity * 0.85f, 0f, 1f);
+                    ChatWindowHudTabStrip.renderUnreadOnly(graphics, mc, unreadTabs, pUnread, unreadOpacity);
+                }
+                continue;
+            }
+
             if (layoutChrome) {
-                int inset = ChatWindowGeometry.LAYOUT_MODE_CONTENT_INSET;
+                int pad = ChatWindowGeometry.padding();
                 // Full outline rect filled (padding strip matches row backdrop base color).
                 int frameL = x;
                 int frameT = y;
@@ -129,13 +185,23 @@ public final class ChatUtilitiesHud {
                 int frameB = y + boxH;
                 if (frameR > frameL && frameB > frameT) {
                     float textBg = mc.options.textBackgroundOpacity().get().floatValue();
+                    float panelM = ChatUtilitiesClientOptions.getChatPanelBackgroundOpacityMultiplier(chatOpen);
                     // One layer only (no per-row strips): matches HUD chat panel opacity, avoids darker “row bands”.
-                    int filler = ARGB.black(Mth.clamp(textBg * chatOpacity, 0f, 1f));
+                    int filler = ARGB.black(Mth.clamp(textBg * chatOpacity * panelM, 0f, 1f));
                     graphics.fill(frameL, frameT, frameR, frameB, filler);
-                    int innerL = x + inset;
-                    int innerT = y + inset;
-                    int innerR = x + boxW - inset;
-                    int innerB = y + boxH - inset;
+                    int innerL = x + pad;
+                    int innerT = y + geo.contentRowOffsetY;
+                    int innerR = x + boxW - pad;
+                    int innerB = y + boxH - geo.rowBottomInsetPx;
+                    if (window.getTabCount() > 1) {
+                        List<int[]> occupied =
+                                chatOpen
+                                        ? occupiedChatWindowBoxesForTabs(mgr, window, mc, gw, gh, guiTick, chatOpen, mx, my)
+                                        : List.of();
+                        ChatWindowHudTabStrip.Placement tabPl =
+                                ChatWindowHudTabStrip.resolve(geo, gw, gh, mc, window, occupied);
+                        ChatWindowHudTabStrip.render(graphics, mc, window, tabPl, chatOpacity, -1000, -1000);
+                    }
                     if (innerR > innerL && innerB > innerT) {
                         graphics.enableScissor(innerL, innerT, innerR, innerB);
                     } else {
@@ -144,10 +210,10 @@ public final class ChatUtilitiesHud {
                     try {
                         if (hasStored) {
                             renderStyledRows(
-                                    graphics, mc, geo, x, y, boxW, boxH, chatOpacity, true);
+                                    graphics, mc, geo, x, y, boxW, boxH, chatOpacity, true, 0);
                         } else {
                             renderPlaceholderRows(
-                                    graphics, mc, geo, x, y, boxW, boxH, 0xAAAAAA, chatOpacity, true);
+                                    graphics, mc, geo, x, y, boxW, boxH, 0xAAAAAA, chatOpacity, true, 0);
                         }
                     } finally {
                         graphics.disableScissor();
@@ -163,11 +229,53 @@ public final class ChatUtilitiesHud {
                     graphics.fill(x + boxW - 2, y + boxH - hintLen, x + boxW - 1, y + boxH, hi);
                 }
             } else if (hasStored) {
-                renderStyledRows(graphics, mc, geo, x, y, boxW, boxH, chatOpacity, false);
+                ChatWindowHudTabStrip.Placement tabPl = null;
+                if (chatExpandedForWindows && window.getTabCount() > 1) {
+                    List<int[]> occupied =
+                            occupiedChatWindowBoxesForTabs(mgr, window, mc, gw, gh, guiTick, chatOpen, mx, my);
+                    tabPl = ChatWindowHudTabStrip.resolve(geo, gw, gh, mc, window, occupied);
+                    if (tabPl.edge() == ChatWindowHudTabStrip.Edge.TOP) {
+                        int ty0 = y + geo.contentRowOffsetY;
+                        float textBg = mc.options.textBackgroundOpacity().get().floatValue();
+                        float panelM = ChatUtilitiesClientOptions.getChatPanelBackgroundOpacityMultiplier(chatOpen);
+                        int fillerTop =
+                                ARGB.black(Mth.clamp(textBg * chatOpacity * panelM, 0f, 1f));
+                        graphics.fill(x, y, x + boxW, ty0, fillerTop);
+                    }
+                }
+                renderStyledRows(graphics, mc, geo, x, y, boxW, boxH, chatOpacity, false, 0);
                 ChatWindowScrollbar.render(graphics, mc, window, geo, chatOpacity, chatOpen);
+                if (tabPl != null) {
+                    ChatWindowHudTabStrip.render(graphics, mc, window, tabPl, chatOpacity, mx, my);
+                }
             } else {
-                renderStyledRows(graphics, mc, geo, x, y, boxW, boxH, chatOpacity, false);
+                ChatWindowHudTabStrip.Placement tabPl = null;
+                if (chatExpandedForWindows && window.getTabCount() > 1) {
+                    List<int[]> occupied =
+                            occupiedChatWindowBoxesForTabs(mgr, window, mc, gw, gh, guiTick, chatOpen, mx, my);
+                    tabPl = ChatWindowHudTabStrip.resolve(geo, gw, gh, mc, window, occupied);
+                    if (tabPl.edge() == ChatWindowHudTabStrip.Edge.TOP) {
+                        int ty0 = y + geo.contentRowOffsetY;
+                        float textBg = mc.options.textBackgroundOpacity().get().floatValue();
+                        float panelM = ChatUtilitiesClientOptions.getChatPanelBackgroundOpacityMultiplier(chatOpen);
+                        int fillerTop =
+                                ARGB.black(Mth.clamp(textBg * chatOpacity * panelM, 0f, 1f));
+                        graphics.fill(x, y, x + boxW, ty0, fillerTop);
+                    }
+                }
+                renderStyledRows(graphics, mc, geo, x, y, boxW, boxH, chatOpacity, false, 0);
+                if (tabPl != null) {
+                    ChatWindowHudTabStrip.render(graphics, mc, window, tabPl, chatOpacity, mx, my);
+                }
             }
+
+        }
+
+        if (chatOpen
+                && !mgr.isPositioning()
+                && ChatUtilitiesClientOptions.isChatSearchBarEnabled()
+                && ChatSearchState.isFiltering()) {
+            ChatSearchOverlay.renderHudJumpTopmost(mc, graphics, gw, gh, mx, my, guiTick, chatOpacity);
         }
 
         if (mgr.isPositioning()) {
@@ -175,6 +283,7 @@ public final class ChatUtilitiesHud {
             int cy = gh / 2;
             graphics.fill(cx, 0, cx + 1, gh, 0x55FFFFFF);
             graphics.fill(0, cy, gw, cy + 1, 0x55FFFFFF);
+            renderLayoutModeHelp(graphics, mc, gw, gh);
         }
 
         ChatWindowHover.hoverTooltipAt(mc, mx, my)
@@ -194,6 +303,96 @@ public final class ChatUtilitiesHud {
     }
 
     /**
+     * When chat is closed and the HUD is showing unread-only tabs, suppress vanilla HUD chat so only the unread strip
+     * remains on-screen.
+     */
+    public static boolean shouldSuppressVanillaChatHud(Minecraft mc) {
+        return false;
+    }
+
+    private static List<int[]> occupiedChatWindowBoxesForTabs(
+            ChatUtilitiesManager mgr,
+            ChatWindow self,
+            Minecraft mc,
+            int gw,
+            int gh,
+            int guiTick,
+            boolean chatOpen,
+            int mx,
+            int my) {
+        List<int[]> out = new ArrayList<>();
+        for (ChatWindow w : mgr.getHudChatWindows()) {
+            if (w == self) {
+                continue;
+            }
+            boolean layoutChrome = mgr.showsLayoutChrome(w);
+            if (!w.isVisible() && !(mgr.isPositioning() && layoutChrome)) {
+                continue;
+            }
+            boolean hasStored = !w.getLines().isEmpty();
+            if (!hasStored && !layoutChrome && !chatOpen) {
+                continue;
+            }
+            Component placeholder = null;
+            if (!hasStored) {
+                placeholder =
+                        layoutChrome
+                                ? Component.literal("[empty]")
+                                : Component.literal("No matching chat yet")
+                                        .withStyle(ChatFormatting.GRAY, ChatFormatting.ITALIC);
+            }
+            ChatWindowGeometry geo =
+                    ChatWindowGeometry.compute(
+                            w,
+                            mc,
+                            gw,
+                            gh,
+                            placeholder,
+                            guiTick,
+                            layoutChrome,
+                            chatOpen,
+                            mx,
+                            my,
+                            false,
+                            false);
+            out.add(new int[] {geo.x, geo.y, geo.x + geo.boxW, geo.y + geo.boxH});
+        }
+        return out;
+    }
+
+    private static void renderLayoutModeHelp(GuiGraphics graphics, Minecraft mc, int gw, int gh) {
+        String[] keys = {
+            "chat-utilities.layout_mode.help.drag",
+            "chat-utilities.layout_mode.help.resize",
+            "chat-utilities.layout_mode.help.escape",
+            "chat-utilities.layout_mode.help.shift_resize",
+        };
+        var font = mc.font;
+        int lineH = font.lineHeight;
+        int maxW = 0;
+        for (String k : keys) {
+            maxW = Math.max(maxW, font.width(I18n.get(k)));
+        }
+        int padX = 12;
+        int padY = 10;
+        int boxW = maxW + 2 * padX;
+        int boxH = keys.length * lineH + 2 * padY;
+        int bx = (gw - boxW) / 2;
+        int by = (gh - boxH) / 2;
+        graphics.fill(bx, by, bx + boxW, by + boxH, 0xC0101010);
+        graphics.renderOutline(bx, by, boxW, boxH, 0xFF707088);
+        for (int i = 0; i < keys.length; i++) {
+            graphics.drawString(
+                    font,
+                    I18n.get(keys[i]),
+                    bx + padX,
+                    by + padY + i * lineH,
+                    0xFFE8EEF8,
+                    false);
+        }
+    }
+
+    /**
      * Per-line backdrop like vanilla HUD chat pass 1: {@code fill(-4, rowTop, rowInnerWidth + 8, rowBottom,
      * ARGB.black(lineOpacity * textBackgroundOpacity))} in chat-local space; here {@code tx} is the text origin.
      */
@@ -206,13 +405,14 @@ public final class ChatUtilitiesHud {
             int rowBottom,
             float lineOpacity) {
         float textBg = mc.options.textBackgroundOpacity().get().floatValue();
-        float a = Mth.clamp(lineOpacity * textBg, 0f, 1f);
+        float panelM = ChatUtilitiesClientOptions.getChatPanelBackgroundOpacityMultiplier(mc.screen instanceof ChatScreen);
+        float a = Mth.clamp(lineOpacity * textBg * panelM, 0f, 1f);
         int argb = ARGB.black(a);
         graphics.fill(tx - 4, rowTop, tx + innerWidth + 8, rowBottom, argb);
     }
 
     /**
-     * @param layoutPreview when true, caller scissored to inner rect; use {@link ChatWindowGeometry#LAYOUT_MODE_CONTENT_INSET}.
+     * @param layoutPreview when true, caller has already scissored to the inner content rect (adjust-layout overlay).
      */
     private static void renderStyledRows(
             GuiGraphics graphics,
@@ -223,21 +423,18 @@ public final class ChatUtilitiesHud {
             int boxW,
             int boxH,
             float chatOpacity,
-            boolean layoutPreview) {
+            boolean layoutPreview,
+            int layoutExtraTop) {
         boolean ownScissor = !layoutPreview;
         if (ownScissor) {
             graphics.enableScissor(x, y, x + boxW, y + boxH);
         }
         try {
-            int pad = layoutPreview ? ChatWindowGeometry.LAYOUT_MODE_CONTENT_INSET : ChatWindowGeometry.padding();
+            int pad = ChatWindowGeometry.padding();
             int tx = x + pad;
             int innerW = boxW - 2 * pad;
             int lh = geo.lineHeight();
-            int ty =
-                    y
-                            + pad
-                            + (layoutPreview ? 0 : ChatWindowGeometry.CONTENT_TOP_INSET)
-                            + geo.contentStartYOffset;
+            int ty = y + geo.contentRowOffsetY + layoutExtraTop;
             for (ChatWindowGeometry.RenderedRow row : geo.rows) {
                 int rowBottom = ty + lh;
                 if (!layoutPreview) {
@@ -266,21 +463,18 @@ public final class ChatUtilitiesHud {
             int boxH,
             int rgb,
             float chatOpacity,
-            boolean layoutPreview) {
+            boolean layoutPreview,
+            int layoutExtraTop) {
         boolean ownScissor = !layoutPreview;
         if (ownScissor) {
             graphics.enableScissor(x, y, x + boxW, y + boxH);
         }
         try {
-            int pad = layoutPreview ? ChatWindowGeometry.LAYOUT_MODE_CONTENT_INSET : ChatWindowGeometry.padding();
+            int pad = ChatWindowGeometry.padding();
             int tx = x + pad;
             int innerW = boxW - 2 * pad;
             int lh = geo.lineHeight();
-            int ty =
-                    y
-                            + pad
-                            + (layoutPreview ? 0 : ChatWindowGeometry.CONTENT_TOP_INSET)
-                            + geo.contentStartYOffset;
+            int ty = y + geo.contentRowOffsetY + layoutExtraTop;
             for (ChatWindowGeometry.RenderedRow row : geo.rows) {
                 int rowBottom = ty + lh;
                 if (!layoutPreview) {

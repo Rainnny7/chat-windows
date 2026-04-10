@@ -37,7 +37,7 @@ public final class ProfileFaviconCache {
     private static ServerStatusPinger pinger;
     private static int tickCounter;
 
-    /** Same blue as sidebar accent when no favicon / no usable color ({@code C_ACCENT} RGB). */
+    /** Default profile-row accent when no favicon / no usable color (legacy mod primary blue RGB). */
     public static final int DEFAULT_PROFILE_ACCENT_RGB = 0x3A9FE0;
 
     private ProfileFaviconCache() {}

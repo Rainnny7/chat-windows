@@ -1,17 +1,36 @@
-# Chat Windows
+# Chat Utilities
 
-A [Fabric](https://fabricmc.net/) client mod that filters matching chat into extra HUD panes you can move and resize.
-Patterns use plain text by default; prefix with `regex:` when you want a full Java regular expression.
+A [Fabric](https://fabricmc.net/) client mod that upgrades your chat into a configurable toolkit: **chat windows with tabs**, a **GUI settings menu**, **chat search**, **click-to-copy**, **image link previews**, **timestamps**, and more.
 
 [View a demo on YouTube](https://youtu.be/lMcVxxYGzR0)
 
-## Background
+## Key features
 
-I wanted something like [LabyMod](https://www.labymod.net/)’s chat filtering—separate panes for matched messages—but as
-its **own Fabric mod**, not tied to a big client stack. I couldn’t find an existing mod that did that the way I wanted,
-so this project exists to fill that gap.
+- **In-game GUI**: open the Chat Utilities menu via the keybind (**Open Chat Utilities**) or `/chatutils` (`/chatutilities`).
+- **Chat windows + tabs**: create extra HUD panes, split them into tabs, and **drag/resize** them with an “Adjust Layout” mode.
+- **Window filtering**: route matching messages into windows/tabs using **plain text** patterns or `regex:` Java regex.
+- **Unread tab badges**: optional red unread indicators on background tabs.
+- **Chat search bar**: optional filter row when chat is open, with a **Jump** action to snap to a matched line.
+- **Click to copy**: copy plain or formatted chat with configurable mouse binds; choose output style (**Vanilla `&`**, **Section `§`**, or **MiniMessage**).
+- **Chat symbol selector**: quick picker for inserting symbols/colors/styles with your chosen code style.
+- **Image link previews**: hover whitelisted image URLs for thumbnails; open fullscreen via keybind or Shift+click (configurable).
+- **Timestamps**: prepend timestamps using `DateTimeFormatter` patterns and a configurable color.
+- **Smooth chat + visuals**: fade/slide-in animations, chat background opacity controls, optional chat text shadow.
+- **Bigger history + stacking repeats**: optional longer chat history and repeated-message stacking with a `(xN)` counter.
+- **Command aliases**: map `/short` → `/long ...` while preserving arguments (longest match wins).
+- **Profiles + actions**: per-server profiles with configurable chat actions (ignore, play sounds, highlight, text replacement, auto responses) and import/export.
 
-The codebase is **fully vibe coded**— the goal of a small mod I can actually use.
+## How to open it
+
+- **Keybind**: Controls → Chat Utilities → **Open Chat Utilities**
+- **Commands** (client-side):
+  - `/chatutils`
+  - `/chatutilities`
+
+## Patterns (windows + search)
+
+- **Plain text (default)**: matched as a literal substring on chat with formatting stripped. Characters like `.`, `*`, `+`, and brackets are not special.
+- **`regex:` prefix**: everything after `regex:` (any casing) is compiled as a Java `Pattern`. Example: `regex:.*joined the lobby.*`
 
 ## Requirements
 
@@ -22,43 +41,13 @@ The codebase is **fully vibe coded**— the goal of a small mod I can actually u
 
 ## Download
 
-Download the mod jar from **[GitHub Releases](https://github.com/Rainnny7/chat-windows/releases)** and place it in your
-`mods` folder together with [Fabric API](https://modrinth.com/mod/fabric-api).
+Download the mod jar from **[GitHub Releases](https://github.com/Rainnny7/chat-windows/releases)** and place it in your `mods` folder together with [Fabric API](https://modrinth.com/mod/fabric-api).
 
 ## Installation
 
-Add the mod jar (and Fabric API) to your client’s `mods` folder. The mod is **client-only** and does not need to be
-installed on a dedicated server.
+Add the mod jar (and Fabric API) to your client’s `mods` folder. The mod is **client-only** and does not need to be installed on a dedicated server.
 
-## Usage
+## Config & migration
 
-Matching lines are **removed from the main chat HUD** and shown only in the windows that match. Configure everything
-with the `/chatwindow` command (client-side).
-
-### Patterns
-
-- **Plain text** — The pattern is matched as a literal substring on chat with formatting codes stripped. Characters like
-  `.`, `*`, `+`, and brackets are not special.
-- **`regex:` prefix** — Everything after `regex:` (any casing) is compiled as a Java `Pattern`. Example:
-  `regex:.*joined the lobby.*`
-
-Legacy configs without `patternFormat` in JSON are treated as full-regex strings and are migrated on load (each pattern
-is stored with a `regex:` prefix when you save).
-
-### Commands
-
-| Command                                      | Description                                                       |
-|----------------------------------------------|-------------------------------------------------------------------|
-| `/chatwindow create <id> <pattern>`          | Create a window (error if `id` already exists).                   |
-| `/chatwindow add-pattern <id> <pattern>`     | Add another pattern to a window.                                  |
-| `/chatwindow list-patterns <id>`             | List patterns for a window.                                       |
-| `/chatwindow remove-pattern <id> <position>` | Remove pattern by 1-based index (cannot remove the last pattern). |
-| `/chatwindow list`                           | List all windows.                                                 |
-| `/chatwindow position <id>`                  | Toggle drag/resize mode for that window.                          |
-| `/chatwindow toggle <id>`                    | Show or hide a window.                                            |
-| `/chatwindow remove <id>`                    | Delete a window.                                                  |
-
-### Config
-
-Settings are saved under `.minecraft/config/chat-windows.json` (via [Fabric Loader](https://fabricmc.net/)’s config
-directory).
+- **Config file**: `.minecraft/config/chat-utilities.json`
+- **Legacy migration**: older `.minecraft/config/chat-windows.json` configs are migrated on load.

@@ -184,8 +184,20 @@ public final class ServerProfileListWidget {
 
     private static String profileStats(ServerProfile p) {
         int w = p.getWindows().size();
-        int ign = p.getIgnorePatternSources().size();
-        int snd = p.getMessageSounds().size();
+        int ign = 0;
+        int snd = 0;
+        int hl = 0;
+        for (me.braydon.chatutilities.chat.ChatActionGroup g : p.getChatActionGroups()) {
+            for (me.braydon.chatutilities.chat.ChatActionEffect e : g.getEffects()) {
+                if (e.getType() == me.braydon.chatutilities.chat.ChatActionEffect.Type.IGNORE) {
+                    ign++;
+                } else if (e.getType() == me.braydon.chatutilities.chat.ChatActionEffect.Type.PLAY_SOUND) {
+                    snd++;
+                } else if (e.getType() == me.braydon.chatutilities.chat.ChatActionEffect.Type.COLOR_HIGHLIGHT) {
+                    hl++;
+                }
+            }
+        }
         return w
                 + (w == 1 ? " window" : " windows")
                 + ", "
@@ -193,7 +205,10 @@ public final class ServerProfileListWidget {
                 + (ign == 1 ? " ignore" : " ignores")
                 + ", "
                 + snd
-                + (snd == 1 ? " sound" : " sounds");
+                + (snd == 1 ? " sound" : " sounds")
+                + ", "
+                + hl
+                + (hl == 1 ? " highlight" : " highlights");
     }
 
     private static String summarizeServers(ServerProfile p) {

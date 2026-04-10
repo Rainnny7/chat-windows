@@ -6,10 +6,20 @@
 	"client": [
 		"ChatComponentAccess",
 		"ChatComponentClickableTextSlideMixin",
+		"ChatComponentFocusPeekMixin",
 		"ChatComponentDrawingFocusedSlideMixin",
+		"ChatPanelBackgroundAlphaMixin",
+		"ChatPanelBackgroundAlphaUnfocusedMixin",
 		"ChatComponentMixin",
+		"GuiRenderChatPeekMixin",
+		"CommandSuggestionsMixin",
 		"ChatScreenMixin",
+		"ChatScreenInputAccess",
+		"GuiGraphicsHoverTooltipMixin",
+		"GuiGraphicsSearchOutlineMixin",
 		"GuiGraphicsMixin",
+		"ScreenMixin",
+		"ScreenInvoker",
 		"MinecraftMixin"
 	],
 	"injectors": {

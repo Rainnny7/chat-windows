@@ -5,7 +5,23 @@
       "Bash(./gradlew compileClientJava)",
       "mcp__ide__getDiagnostics",
       "Bash(jar tf:*)",
-      "Bash('/c/Program Files/Java/jdk-25.0.2/bin/jar' tf ./.gradle/loom-cache/minecraftMaven/net/minecraft/minecraft-clientOnly-6dd721cd7d/1.21.11-loom.mappings.1_21_11.layered+hash.2198-v2/minecraft-clientOnly-6dd721cd7d-1.21.11-loom.mappings.1_21_11.layered+hash.2198-v2-sources.jar)"
+      "Bash('/c/Program Files/Java/jdk-25.0.2/bin/jar' tf ./.gradle/loom-cache/minecraftMaven/net/minecraft/minecraft-clientOnly-6dd721cd7d/1.21.11-loom.mappings.1_21_11.layered+hash.2198-v2/minecraft-clientOnly-6dd721cd7d-1.21.11-loom.mappings.1_21_11.layered+hash.2198-v2-sources.jar)",
+      "Bash(del:*)",
+      "Bash(awk 'NR>=94500 && NR<=94570' \"C:\\\\Users\\\\braydon\\\\.gradle\\\\caches\\\\fabric-loom\\\\1.21.11\\\\loom.mappings.1_21_11.layered+hash.2198-v2\\\\mappings.tiny\")",
+      "Bash(awk NR>=93868 && NR<=94040:*)",
+      "Read(//c/tmp/**)",
+      "Bash(jar xf:*)",
+      "Bash(mkdir -p /c/tmp/mcsrc)",
+      "Bash(\"/c/Program Files/Java/jdk-25.0.2/bin/jar\" xf \"C:/Users/braydon/Desktop/Development/Minecraft/chat-windows/.gradle/loom-cache/minecraftMaven/net/minecraft/minecraft-clientOnly-6dd721cd7d/1.21.11-loom.mappings.1_21_11.layered+hash.2198-v2/minecraft-clientOnly-6dd721cd7d-1.21.11-loom.mappings.1_21_11.layered+hash.2198-v2-sources.jar\" -C /c/tmp/mcsrc \"net/minecraft/client/gui/Gui.java\" \"net/minecraft/client/gui/components/ChatComponent.java\")",
+      "Bash(echo \"exit: $?\")",
+      "Bash(mkdir -p /c/tmp/mcsrc2)",
+      "Bash(\"/c/Program Files/Java/jdk-25.0.2/bin/jar\" xf \"C:/Users/braydon/Desktop/Development/Minecraft/chat-windows/.gradle/loom-cache/minecraftMaven/net/minecraft/minecraft-clientOnly-6dd721cd7d/1.21.11-loom.mappings.1_21_11.layered+hash.2198-v2/minecraft-clientOnly-6dd721cd7d-1.21.11-loom.mappings.1_21_11.layered+hash.2198-v2-sources.jar\" -C /c/tmp/mcsrc2 \"net/minecraft/client/multiplayer/chat/ChatListener.java\")",
+      "Bash(\"/c/Program Files/Java/jdk-25.0.2/bin/jar\" xf \"C:/Users/braydon/Desktop/Development/Minecraft/chat-windows/.gradle/loom-cache/minecraftMaven/net/minecraft/minecraft-clientOnly-6dd721cd7d/1.21.11-loom.mappings.1_21_11.layered+hash.2198-v2/minecraft-clientOnly-6dd721cd7d-1.21.11-loom.mappings.1_21_11.layered+hash.2198-v2-sources.jar\" -C /c/tmp/mcsrc \"net/minecraft/client/multiplayer/ClientPacketListener.java\")",
+      "Bash(sed -n '2727,2737p' /c/tmp/mcsrc/net/minecraft/client/multiplayer/ClientPacketListener.java)",
+      "Bash(sed -n '498,520p' /c/tmp/mcsrc/net/minecraft/client/multiplayer/ClientPacketListener.java)",
+      "Bash(git:*)",
+      "Bash(xargs -I{} jar tf {})",
+      "Bash(python3 -c ':*)"
     ]
   }
 }

@@ -1,0 +1,33 @@
+package me.braydon.chatutilities.mixin.client;
+
+import me.braydon.chatutilities.client.ChatUtilitiesClientOptions;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.ModifyArg;
+
+/** Applies focused-chat panel opacity to vanilla chat row fills while chat is open. */
+@Mixin(targets = "net.minecraft.client.gui.components.ChatComponent$DrawingFocusedGraphicsAccess")
+public class ChatPanelBackgroundAlphaMixin {
+
+    @ModifyArg(
+            method = "fill",
+            at =
+                    @At(
+                            value = "INVOKE",
+                            target = "Lnet/minecraft/client/gui/GuiGraphics;fill(IIIII)V"),
+            index = 4)
+    private int chatUtilities$multiplyChatRowFillAlpha(int color) {
+        return ChatUtilitiesClientOptions.multiplyChatPanelBackgroundArgb(color, true);
+    }
+
+    @ModifyArg(
+            method = "handleTag",
+            at =
+                    @At(
+                            value = "INVOKE",
+                            target = "Lnet/minecraft/client/gui/GuiGraphics;fill(IIIII)V"),
+            index = 4)
+    private int chatUtilities$multiplyTagFillAlpha(int color) {
+        return ChatUtilitiesClientOptions.multiplyChatPanelBackgroundArgb(color, true);
+    }
+}

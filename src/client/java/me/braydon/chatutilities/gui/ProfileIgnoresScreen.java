@@ -1,32 +1,15 @@
 package me.braydon.chatutilities.gui;
 
-import com.mojang.blaze3d.platform.InputConstants;
-import me.braydon.chatutilities.chat.ChatUtilitiesManager;
-import me.braydon.chatutilities.chat.ServerProfile;
-import net.minecraft.client.gui.GuiGraphics;
-import net.minecraft.client.gui.components.Button;
-import net.minecraft.client.gui.components.EditBox;
 import net.minecraft.client.gui.screens.Screen;
-import net.minecraft.client.input.KeyEvent;
 import net.minecraft.network.chat.Component;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.regex.PatternSyntaxException;
-
-/** Manage ignored chat patterns for one profile. */
+/**
+ * Legacy entry point: opens the main menu on {@link ChatUtilitiesRootScreen.Panel#CHAT_ACTIONS}.
+ */
 public class ProfileIgnoresScreen extends Screen implements ProfileWorkflowScreen {
-    private static final int IGN_ROWS = 8;
-    private static final int BODY_TOP = 114;
 
     private final String profileId;
     private final ChatUtilitiesRootScreen chatRoot;
-    private EditBox newIgnoreField;
-    private int ignScroll;
-    private int labelIgnoresY;
-
-    private record PendingIgnoreEdit(EditBox box, ServerProfile profile, int listIndex) {}
-    private final List<PendingIgnoreEdit> pendingIgnoreEdits = new ArrayList<>();
 
     public ProfileIgnoresScreen(String profileId, ChatUtilitiesRootScreen chatRoot) {
         super(Component.literal("Ignored Chat"));
@@ -46,161 +29,9 @@ public class ProfileIgnoresScreen extends Screen implements ProfileWorkflowScree
 
     @Override
     protected void init() {
-        clearWidgets();
-        pendingIgnoreEdits.clear();
-        ChatUtilitiesManager mgr = ChatUtilitiesManager.get();
-        ServerProfile p = mgr.getProfile(profileId);
-        if (p == null) {
-            onClose();
-            return;
+        if (minecraft != null) {
+            minecraft.setScreen(
+                    new ChatUtilitiesRootScreen(chatRoot.getMenuParent(), profileId, ChatUtilitiesRootScreen.Panel.CHAT_ACTIONS));
         }
-
-        int cx = this.width / 2;
-        int y = BODY_TOP;
-
-        labelIgnoresY = y - 11;
-        newIgnoreField = new EditBox(this.font, cx - 100, y, 130, 20, Component.literal("ign"));
-        newIgnoreField.setMaxLength(2048);
-        newIgnoreField.setHint(ChatUtilitiesScreenLayout.PATTERN_INPUT_HINT);
-        addRenderableWidget(newIgnoreField);
-        addRenderableWidget(
-                Button.builder(Component.literal("Add Ignore"), b -> {
-                            try {
-                                mgr.addIgnorePattern(p, newIgnoreField.getValue());
-                                newIgnoreField.setValue("");
-                            } catch (PatternSyntaxException ignored) {
-                            }
-                            init();
-                        })
-                        .bounds(cx + 38, y, 62, 20)
-                        .build());
-        y += 24;
-
-        List<String> ignores = p.getIgnorePatternSources();
-        int igMax = Math.max(0, ignores.size() - IGN_ROWS);
-        ignScroll = Math.min(ignScroll, igMax);
-        if (ignScroll > 0) {
-            addRenderableWidget(
-                    Button.builder(Component.literal("Up"), b -> {
-                                ignScroll = Math.max(0, ignScroll - IGN_ROWS);
-                                init();
-                            })
-                            .bounds(cx - 100, y, 95, 20)
-                            .build());
-        }
-        if (ignScroll + IGN_ROWS < ignores.size()) {
-            addRenderableWidget(
-                    Button.builder(Component.literal("Down"), b -> {
-                                ignScroll = Math.min(igMax, ignScroll + IGN_ROWS);
-                                init();
-                            })
-                            .bounds(ignScroll > 0 ? cx + 5 : cx - 100, y, 95, 20)
-                            .build());
-        }
-        if (!ignores.isEmpty()) {
-            y += 24;
-        }
-        int igEnd = Math.min(ignScroll + IGN_ROWS, ignores.size());
-        int ignRowW = 200;
-        int ignXBtnW = 24;
-        int ignGap = 4;
-        for (int i = ignScroll; i < igEnd; i++) {
-            String pat = ignores.get(i);
-            int idx = i;
-            EditBox ignEb =
-                    new EditBox(this.font, cx - 100, y, ignRowW - ignXBtnW - ignGap, 20, Component.literal("ign" + idx));
-            ignEb.setMaxLength(2048);
-            ignEb.setValue(pat);
-            ignEb.setHint(ChatUtilitiesScreenLayout.PATTERN_INPUT_HINT);
-            addRenderableWidget(ignEb);
-            addRenderableWidget(
-                    Button.builder(Component.literal("✕"), b -> {
-                                mgr.removeIgnorePattern(p, idx);
-                                init();
-                            })
-                            .bounds(cx - 100 + ignRowW - ignXBtnW, y, ignXBtnW, 20)
-                            .build());
-            pendingIgnoreEdits.add(new PendingIgnoreEdit(ignEb, p, idx));
-            y += 22;
-        }
-
-        int footerY = ChatUtilitiesScreenLayout.footerRowY(this);
-        int btnW = 100;
-        int gap = 8;
-        int rowW = btnW * 2 + gap;
-        int footLeft = cx - rowW / 2;
-        addRenderableWidget(
-                Button.builder(Component.literal("Back"), b -> onClose())
-                        .bounds(footLeft, footerY, btnW, 20)
-                        .build());
-        addRenderableWidget(
-                Button.builder(
-                                ChatUtilitiesScreenLayout.BUTTON_DONE,
-                                b -> ChatUtilitiesScreenLayout.closeEntireChatUtilitiesMenu(chatRoot))
-                        .bounds(footLeft + btnW + gap, footerY, btnW, 20)
-                        .build());
-    }
-
-    @Override
-    public boolean keyPressed(KeyEvent event) {
-        int key = event.key();
-        if (key == InputConstants.KEY_RETURN || key == InputConstants.KEY_NUMPADENTER) {
-            ChatUtilitiesManager mgr = ChatUtilitiesManager.get();
-            ServerProfile p = mgr.getProfile(profileId);
-            if (p != null) {
-                for (PendingIgnoreEdit pie : pendingIgnoreEdits) {
-                    if (pie.box().isFocused()) {
-                        try {
-                            mgr.setIgnorePatternAt(pie.profile(), pie.listIndex(), pie.box().getValue());
-                            init();
-                        } catch (PatternSyntaxException ignored) {
-                        }
-                        return true;
-                    }
-                }
-                if (newIgnoreField != null && newIgnoreField.isFocused()) {
-                    try {
-                        mgr.addIgnorePattern(p, newIgnoreField.getValue());
-                        newIgnoreField.setValue("");
-                    } catch (PatternSyntaxException ignored) {
-                    }
-                    init();
-                    return true;
-                }
-            }
-        }
-        return super.keyPressed(event);
-    }
-
-    @Override
-    public void onClose() {
-        if (this.minecraft != null) {
-            this.minecraft.setScreen(chatRoot);
-        }
-    }
-
-    @Override
-    public void render(GuiGraphics graphics, int mouseX, int mouseY, float partialTick) {
-        super.render(graphics, mouseX, mouseY, partialTick);
-        int cx = this.width / 2;
-        int margin = 30;
-        int wrapW = Math.min(320, this.width - 40);
-
-        graphics.drawCenteredString(
-                this.font, this.title, cx, ChatUtilitiesScreenLayout.TITLE_Y, ChatUtilitiesScreenLayout.TEXT_WHITE);
-
-        ChatUtilitiesScreenLayout.drawCenteredWrapped(
-                this.font,
-                graphics,
-                Component.literal(
-                        "Define what never reaches your chat so noise and clutter stay out of the way."),
-                cx,
-                ChatUtilitiesScreenLayout.TITLE_Y + 12,
-                wrapW,
-                ChatUtilitiesScreenLayout.TEXT_GRAY,
-                10);
-
-        graphics.drawString(
-                this.font, "Patterns", margin, labelIgnoresY, ChatUtilitiesScreenLayout.TEXT_LABEL, false);
     }
 }
